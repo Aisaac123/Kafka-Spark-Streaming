@@ -4,6 +4,7 @@ import os
 import json
 import time
 import ast
+import argparse
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,14 +20,44 @@ CSV_COLUMNS = [
     "visitId", "visitNumber", "visitStartTime"
 ]
 
-# Configuración
-CSV_PATH     = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'example.csv')
-KAFKA_TOPIC  = 'ventas'
-KAFKA_SERVER = 'localhost:9092'
-BATCH_SIZE   = 1      # Filas por batch
-NUM_WORKERS  = 1      # Hilos en paralelo
-SLEEP_TIME   = 1      # Segundos de espera entre mensajes (0 = sin retardo)
-MAX_LINES    = 1      # Número total de líneas a leer (0 = todas)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Producer de CSV a Kafka con configuración por CLI")
+    parser.add_argument(
+        '--csv-path', type=str,
+        default=os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'data_02.csv'),
+        help='Ruta relativa desde raíz/data al CSV'
+    )
+    parser.add_argument(
+        '--kafka-topic', type=str,
+        default='visits', help='Topic de Kafka'
+    )
+    parser.add_argument(
+        '--kafka-server', type=str,
+        default='localhost:9092', help='Bootstrap server de Kafka'
+    )
+    parser.add_argument(
+        '--batch-size', type=int,
+        default=100, help='Filas por batch'
+    )
+    parser.add_argument(
+        '--num-workers', type=int,
+        default=1, help='Número de hilos en paralelo'
+    )
+    parser.add_argument(
+        '--sleep-time', type=float,
+        default=0, help='Segundos de espera entre mensajes'
+    )
+    parser.add_argument(
+        '--max-lines', type=int,
+        default=0, help='Número total de líneas a leer (0 = todas)'
+    )
+    parser.add_argument(
+        '--start-line', type=int,
+        default=1,
+        help='Número de línea (basado en datos) donde iniciar la lectura (1 = primera línea después del header)'
+    )
+    return parser.parse_args()
 
 
 def parse_field(raw: str):
@@ -50,7 +81,7 @@ def process_csv_line(line: list) -> dict:
     return {CSV_COLUMNS[i]: parse_field(raw) for i, raw in enumerate(line)}
 
 
-def send_batch(producer: KafkaProducer, batch: list, batch_id: int):
+def send_batch(producer: KafkaProducer, batch: list, batch_id: int, topic: str, sleep_time: float):
     start = datetime.now().strftime('%H:%M:%S')
     print(f"🚀 [Batch {batch_id}] Iniciando envío a las {start} (tamaño={len(batch)})")
     for row in batch:
@@ -58,24 +89,42 @@ def send_batch(producer: KafkaProducer, batch: list, batch_id: int):
         if record is None:
             print(f"⚠️ [Batch {batch_id}] Línea malformada, saltando")
             continue
-        producer.send(KAFKA_TOPIC, record) \
-                .add_errback(lambda e, b=batch_id: print(f"❌ [Batch {b}] Error enviando mensaje: {e}"))
-        if SLEEP_TIME:
-            time.sleep(SLEEP_TIME)
+        producer.send(topic, record)
+        if sleep_time:
+            time.sleep(sleep_time)
     producer.flush()
     end = datetime.now().strftime('%H:%M:%S')
     print(f"✅ [Batch {batch_id}] Finalizado correctamente a las {end}")
 
 
+def callback_handler(future):
+    """Manejador de callbacks para los futures"""
+    try:
+        future.result()
+    except Exception as e:
+        print(f"⚠️ Excepción en worker de batch: {e}")
+
+
 def main():
+    args = parse_args()
+    csv_path = os.path.abspath(args.csv_path)
+    kafka_topic = args.kafka_topic
+    kafka_server = args.kafka_server
+    batch_size = args.batch_size
+    num_workers = args.num_workers
+    sleep_time = args.sleep_time
+    max_lines = args.max_lines
+    start_line = args.start_line
+
     # Mensaje de cuántas líneas se van a leer
-    if MAX_LINES == 0:
-        print("📊 Se van a leer: todas las líneas.\n")
+    if max_lines == 0:
+        print("📊 Se van a leer: todas las líneas.")
     else:
-        print(f"📊 Se van a leer: {MAX_LINES} líneas.\n")
+        print(f"📊 Se van a leer: {max_lines} líneas.")
+    print(f"🔍 Se iniciará lectura desde la línea de datos {start_line} después del header.\n")
 
     producer = KafkaProducer(
-        bootstrap_servers=KAFKA_SERVER,
+        bootstrap_servers=kafka_server,
         linger_ms=10,
         batch_size=32768,
         buffer_memory=67108864,
@@ -84,45 +133,59 @@ def main():
     )
 
     lines_read = 0
-    with open(CSV_PATH, mode='r', encoding='utf-8') as csvfile, \
-         ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    with open(csv_path, mode='r', encoding='utf-8') as csvfile, \
+         ThreadPoolExecutor(max_workers=num_workers) as executor:
 
         reader = csv.reader(csvfile)
-        next(reader, None)  # saltar header
+        # Saltar header
+        next(reader, None)
+        # Saltar hasta start_line
+        for _ in range(start_line - 1):
+            if next(reader, None) is None:
+                break
 
         batch = []
         batch_id = 1
-        futures = []
 
         for row in reader:
-            # Si tenemos límite y ya lo alcanzamos, paramos
-            if 0 < MAX_LINES <= lines_read:
+            if 0 < max_lines <= lines_read:
                 break
 
             batch.append(row)
             lines_read += 1
 
-            if len(batch) >= BATCH_SIZE:
-                futures.append(executor.submit(send_batch, producer, batch.copy(), batch_id))
+            if len(batch) >= batch_size:
+                future = executor.submit(
+                    send_batch,
+                    producer,
+                    batch.copy(),
+                    batch_id,
+                    kafka_topic,
+                    sleep_time
+                )
+                future.add_done_callback(callback_handler)
                 batch_id += 1
                 batch.clear()
 
         # Enviar último batch parcial
         if batch:
-            futures.append(executor.submit(send_batch, producer, batch.copy(), batch_id))
+            future = executor.submit(
+                send_batch,
+                producer,
+                batch.copy(),
+                batch_id,
+                kafka_topic,
+                sleep_time
+            )
+            future.add_done_callback(callback_handler)
 
-        # Esperar a que terminen los envíos
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"⚠️ Excepción en worker de batch: {e}")
+        print("🚀 Todos los trabajos han sido programados")
 
     # Mensaje final
-    if MAX_LINES == 0:
+    if max_lines == 0:
         print(f"\n🏁 Leídas {lines_read} líneas (todo el CSV). Cerrando productor...")
     else:
-        print(f"\n🏁 Leídas {lines_read}/{MAX_LINES} líneas. Cerrando productor...")
+        print(f"\n🏁 Leídas {lines_read}/{max_lines} líneas. Cerrando productor...")
 
     producer.close()
     print("🎉 Proceso completado exitosamente.")

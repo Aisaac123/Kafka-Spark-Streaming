@@ -3,7 +3,7 @@ import sys
 
 def setup_spark_kafka_stream(group_id,
                              bootstrap_servers="ed-kafka:29092",
-                             topic="ventas"):
+                             topic="visits"):
     spark = SparkSession.builder \
         .appName(f"KafkaConsumer_{group_id}") \
         .master("local[*]") \
