@@ -5,9 +5,6 @@ import sys
 import logging
 import json
 import argparse
-from extract import extract_data
-from transform import transform_data
-from load import load_to_warehouse
 
 # Setup logging
 logging.basicConfig(
@@ -55,14 +52,14 @@ def process_batch(df, batch_id, spark, jdbc_url, db_properties):
         return
 
     try:
-        extracted = extract_data(df, spark)
+       """ extracted = extract_data(df, spark)
         if extracted.isEmpty():
             logger.info(f"⏭️ Batch {batch_id}: nada que extraer")
             return
 
         transformed = transform_data(extracted, spark)
         load_to_warehouse(transformed, jdbc_url, db_properties)
-        logger.info(f"✅ Batch {batch_id} completado")
+        logger.info(f"✅ Batch {batch_id} completado")"""
     except Exception as e:
         logger.error(f"💥 Batch {batch_id} falló: {e}")
         raise
