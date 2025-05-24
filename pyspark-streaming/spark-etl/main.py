@@ -6,6 +6,11 @@ import logging
 import json
 import argparse
 
+# Importar módulos ETL
+from extract import extract_data
+from transform import transform_data
+from load import load_to_warehouse
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -52,14 +57,20 @@ def process_batch(df, batch_id, spark, jdbc_url, db_properties):
         return
 
     try:
-       """ extracted = extract_data(df, spark)
+        # Print the raw JSON message received from Kafka
+        logger.info("📥 Mensaje recibido:")
+        message_row = df.select("message").first()
+        if message_row:
+            logger.info(message_row["message"])
+
+        extracted = extract_data(df, spark)
         if extracted.isEmpty():
             logger.info(f"⏭️ Batch {batch_id}: nada que extraer")
             return
 
         transformed = transform_data(extracted, spark)
         load_to_warehouse(transformed, jdbc_url, db_properties)
-        logger.info(f"✅ Batch {batch_id} completado")"""
+        logger.info(f"✅ Batch {batch_id} completado")
     except Exception as e:
         logger.error(f"💥 Batch {batch_id} falló: {e}")
         raise
@@ -99,7 +110,7 @@ def main():
 
     # Defaults
     bootstrap_servers = "ed-kafka:29092"
-    trigger_interval = "10 seconds"
+    trigger_interval = "30 seconds"
     checkpoint_base = "/tmp/checkpoints/etl"
     checkpoint_path = f"{checkpoint_base}/partitions_{args.partitions.replace(',', '_')}"
 

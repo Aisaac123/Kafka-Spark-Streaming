@@ -5,6 +5,8 @@ import json
 import time
 import ast
 import argparse
+from typing import Any
+
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,6 +62,17 @@ def parse_args():
     return parser.parse_args()
 
 
+def remove_unavailable(obj):
+    if isinstance(obj, dict):
+        return {
+            k: remove_unavailable(v)
+            for k, v in obj.items()
+            if v != "not available in demo dataset"
+        }
+    elif isinstance(obj, list):
+        return [remove_unavailable(elem) for elem in obj]
+    return obj
+
 def parse_field(raw: str):
     v = raw.strip()
     if v.startswith('"') and v.endswith('"'):
@@ -75,10 +88,11 @@ def parse_field(raw: str):
         return v
 
 
-def process_csv_line(line: list) -> dict:
+def process_csv_line(line: list) -> None | dict[Any, Any] | list[Any] | dict | list:
     if len(line) != len(CSV_COLUMNS):
         return None
-    return {CSV_COLUMNS[i]: parse_field(raw) for i, raw in enumerate(line)}
+    record = {CSV_COLUMNS[i]: parse_field(raw) for i, raw in enumerate(line)}
+    return remove_unavailable(record)
 
 
 def send_batch(producer: KafkaProducer, batch: list, batch_id: int, topic: str, sleep_time: float):
