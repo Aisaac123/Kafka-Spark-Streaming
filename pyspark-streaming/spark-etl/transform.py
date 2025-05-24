@@ -117,7 +117,7 @@ def create_empty_dataframe(spark: SparkSession) -> dict:
     """Crea un DataFrame vacío con la estructura correcta"""
     # Crear dimensiones vacías
     dim_time_schema = "time_id STRING, date_int INT, full_date DATE, day INT, month INT,  year INT, quarter INT, day_of_week INT, day_of_week_name STRING, is_weekend BOOLEAN, week_of_year INT, month_name STRING, quarter_name STRING, year_quarter STRING",
-    dim_visitor_schema = "full_visitor_id STRING, visit_number INT, custom_dimensions_value STRING, is_new_visitor BOOLEAN"
+    dim_visitor_schema = "full_visitor_id STRING, original_visitor_id STRING, visit_number INT, custom_dimensions_value STRING, is_new_visitor BOOLEAN"
     dim_device_schema = "device_id STRING, browser STRING, operating_system STRING, device_category STRING, is_mobile BOOLEAN"
     dim_geo_schema = "geo_id STRING, continent STRING, country STRING, region STRING, city STRING"
     dim_channel_schema = "channel_id STRING, channel_grouping STRING"
@@ -637,15 +637,7 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
     base_df = df.withColumn("visit_id", col("visitId").cast(IntegerType())) \
         .withColumn("network_domain", coalesce(col("geoNetwork.networkDomain"), lit("Unknown"))) \
         .withColumn("is_new_visitor",
-                    when(col("totals.newVisits") == "1", lit(True)).otherwise(lit(False))) \
-        .withColumn("full_visitor_id",  # Generar hash aquí
-                    sha2(concat_ws("|",
-                                   col("fullVisitorId").cast(StringType()),
-                                   coalesce(col("visitNumber"), lit("0")),
-                                   coalesce(custom_dim_value_fact, lit("unknown")),
-                                   col("is_new_visitor").cast(StringType())
-                                   ), 256)
-                    )
+                    when(col("totals.newVisits") == "1", lit(True)).otherwise(lit(False)))
     # Verificar si existe la columna totals
     columns = df.columns
     if "totals" in columns:
@@ -718,24 +710,14 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
         .join(dim_time_df, base_df["date"] == dim_time_df["date_int"], "left")
 
     # FIX: Crear la misma combinación de campos para el join que se usa en dim_visitor
-    # Condición de unión actualizada incluyendo is_new_visitor
+    # Condición de unión simplificada para asegurar que se encuentren coincidencias
     visitor_join_condition = (
                                      base_df.fullVisitorId.cast(StringType()) == dim_visitor_df.original_visitor_id
-                             ) & (
-                                     base_df.visitNumber == dim_visitor_df.visit_number
-                             ) & (
-                                     coalesce(
-                                         when(
-                                             size(col("customDimensions")) > 0,
-                                             expr("element_at(transform(customDimensions, x -> x.value), 1)")
-                                         ).otherwise(lit(None)),
-                                         lit("unknown")
-                                     ) == coalesce(dim_visitor_df.custom_dimensions_value, lit("unknown"))
-                             ) & (
-                                     base_df.is_new_visitor == dim_visitor_df.is_new_visitor
                              )
 
-    result = result.join(dim_visitor_df, visitor_join_condition, "left")
+    # Cambiar de left join a inner join para asegurar que solo se incluyan filas con coincidencias
+    # Esto garantiza que cada fila en fact_visits tenga un full_visitor_id válido en dim_visitor
+    result = result.join(dim_visitor_df, visitor_join_condition, "inner")
 
     # Verificar si existe la estructura device
     device_join_condition = lit("unknown") == dim_device_df.device_category
@@ -998,7 +980,7 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
     return result.select(
         col("visit_id"),
         col("time_id"),
-        coalesce(dim_visitor_df["full_visitor_id"], base_df["full_visitor_id"]).alias("full_visitor_id"),
+        dim_visitor_df["full_visitor_id"].alias("full_visitor_id"),
         col("device_id"),
         col("geo_id"),
         col("channel_id"),
