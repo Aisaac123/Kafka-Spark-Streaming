@@ -43,7 +43,7 @@ def setup_kafka_stream(spark, topic, partitions, bootstrap_servers="ed-kafka:290
               .option("assign", assignment)
               .option("startingOffsets", "latest")
               .option("failOnDataLoss", "false")
-              .option("maxOffsetsPerTrigger", 30000)
+              .option("maxOffsetsPerTrigger", 600004)
               .load()
               .selectExpr("CAST(value AS STRING) as message"))
     return raw_df
@@ -57,12 +57,6 @@ def process_batch(df, batch_id, spark, jdbc_url, db_properties):
         return
 
     try:
-        # Print the raw JSON message received from Kafka
-        logger.info("📥 Mensaje recibido:")
-        message_row = df.select("message").first()
-        if message_row:
-            logger.info(message_row["message"])
-
         extracted = extract_data(df, spark)
         if extracted.isEmpty():
             logger.info(f"⏭️ Batch {batch_id}: nada que extraer")
@@ -110,7 +104,7 @@ def main():
 
     # Defaults
     bootstrap_servers = "ed-kafka:29092"
-    trigger_interval = "30 seconds"
+    trigger_interval = "1 minute"
     checkpoint_base = "/tmp/checkpoints/etl"
     checkpoint_path = f"{checkpoint_base}/partitions_{args.partitions.replace(',', '_')}"
 

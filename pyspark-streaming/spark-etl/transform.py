@@ -11,6 +11,7 @@ from datetime import datetime
 
 logger = logging.getLogger("spark-streaming-etl")
 
+
 # Función para generar UUIDs consistentes basados en valores de entrada
 def generate_uuid(values):
     if values is None:
@@ -19,8 +20,10 @@ def generate_uuid(values):
     combined = "".join([str(v) for v in values if v is not None])
     return sha2(combined, 256)
 
+
 # Registrar UDF
 generate_uuid_udf = udf(lambda x: str(uuid.uuid4()), StringType())
+
 
 def transform_data(df: DataFrame, spark: SparkSession) -> DataFrame:
     """
@@ -69,8 +72,8 @@ def transform_data(df: DataFrame, spark: SparkSession) -> DataFrame:
 
         # 2. Crear tabla de hechos
         fact_visits_df = create_fact_visits(
-            df, 
-            dim_time_df, 
+            df,
+            dim_time_df,
             dim_visitor_df,
             dim_device_df,
             dim_geo_df,
@@ -109,13 +112,14 @@ def transform_data(df: DataFrame, spark: SparkSession) -> DataFrame:
         logger.error(f"💥 Error en transform_data: {e}")
         raise
 
+
 def create_empty_dataframe(spark: SparkSession) -> dict:
     """Crea un DataFrame vacío con la estructura correcta"""
     # Crear dimensiones vacías
-    dim_time_schema = "time_id STRING, date INT, day INT, month INT, year INT, quarter INT"
+    dim_time_schema = "time_id STRING, date_int INT, full_date DATE, day INT, month INT,  year INT, quarter INT, day_of_week INT, day_of_week_name STRING, is_weekend BOOLEAN, week_of_year INT, month_name STRING, quarter_name STRING, year_quarter STRING",
     dim_visitor_schema = "full_visitor_id STRING, visit_number INT, custom_dimensions_value STRING, is_new_visitor BOOLEAN"
     dim_device_schema = "device_id STRING, browser STRING, operating_system STRING, device_category STRING, is_mobile BOOLEAN"
-    dim_geo_schema = "geo_id STRING, continent STRING, country STRING, region STRING, city STRING, network_domain STRING"
+    dim_geo_schema = "geo_id STRING, continent STRING, country STRING, region STRING, city STRING"
     dim_channel_schema = "channel_id STRING, channel_grouping STRING"
     dim_traffic_schema = "traffic_source_id STRING, source STRING, medium STRING, campaign STRING"
     dim_product_schema = "product_id STRING, product_sku STRING, v2_product_name STRING, v2_product_category STRING, product_brand STRING, product_variant STRING, product_price DOUBLE"
@@ -124,7 +128,7 @@ def create_empty_dataframe(spark: SparkSession) -> dict:
     # Crear fact table vacía
     fact_visits_schema = """
         visit_id STRING, time_id STRING, full_visitor_id STRING, device_id STRING, 
-        geo_id STRING, channel_id STRING, traffic_source_id STRING, totals_visits INT, 
+        geo_id STRING, channel_id STRING, traffic_source_id STRING, network_domain STRING, totals_visits INT, 
         social_engagement_type INT, totals_hits INT, totals_pageviews INT, 
         totals_bounces INT, totals_time_on_site INT, totals_transaction_revenue DOUBLE
     """
@@ -153,63 +157,95 @@ def create_empty_dataframe(spark: SparkSession) -> dict:
         "fact_visits_promotions": spark.createDataFrame([], fact_visits_promotions_schema)
     }
 
+
 def create_dim_time(df: DataFrame, spark: SparkSession) -> DataFrame:
-    """Crea la dimensión de tiempo"""
-    # Extraer fechas únicas
+    """Crea la dimensión de tiempo con time_id generado por SHA2 de la fecha"""
+    # Extraer fechas únicas del campo 'date' (entero yyyyMMdd)
     dates_df = df.select(col("date")).distinct()
 
-    # Transformar a formato de fecha
-    return dates_df \
-        .withColumn("date_int", col("date").cast(IntegerType())) \
+    # Convertir a string para hash y conservar el date original
+    dim_time_df = dates_df \
         .withColumn("date_str", col("date").cast(StringType())) \
-        .withColumn("date_dt", to_date(col("date_str"), "yyyyMMdd")) \
-        .withColumn("day", dayofmonth(col("date_dt"))) \
-        .withColumn("month", month(col("date_dt"))) \
-        .withColumn("year", year(col("date_dt"))) \
-        .withColumn("quarter", expr("quarter(date_dt)")) \
-        .withColumn("time_id", expr("monotonically_increasing_id() + 1").cast(IntegerType())) \
-        .select("time_id", col("date_int").alias("date"), "day", "month", "year", "quarter")
+        .withColumn("date_int", col("date").cast(IntegerType()))  # Conservar date como entero
+
+    # Generar time_id usando SHA2 de date_str
+    dim_time_df = dim_time_df.withColumn("time_id", sha2(col("date_str"), 256))
+
+    # Calcular atributos de fecha
+    dim_time_df = dim_time_df \
+        .withColumn("full_date", to_date(col("date_str"), "yyyyMMdd")) \
+        .withColumn("day", dayofmonth(col("full_date"))) \
+        .withColumn("month", month(col("full_date"))) \
+        .withColumn("year", year(col("full_date"))) \
+        .withColumn("quarter", expr("quarter(full_date)")) \
+        .withColumn("day_of_week", expr("CASE WHEN dayofweek(full_date) = 1 THEN 7 ELSE dayofweek(full_date) - 1 END")) \
+        .withColumn("day_of_week_name", date_format(col("full_date"), "EEEE")) \
+        .withColumn("is_weekend", expr("day_of_week IN (6,7)")) \
+        .withColumn("week_of_year", expr("weekofyear(full_date)")) \
+        .withColumn("month_name", date_format(col("full_date"), "MMMM")) \
+        .withColumn("quarter_name",
+                    when(col("quarter") == 1, "Q1 - Enero-Marzo")
+                    .when(col("quarter") == 2, "Q2 - Abril-Junio")
+                    .when(col("quarter") == 3, "Q3 - Julio-Septiembre")
+                    .otherwise("Q4 - Octubre-Diciembre")
+                    ) \
+        .withColumn("year_quarter",
+                    concat(col("year"), lit("-Q"), col("quarter"), lit(" - "), col("quarter_name"))
+                    )
+
+    return dim_time_df.select(
+        "time_id",
+        "date_int",
+        "full_date",
+        "day",
+        "month",
+        "year",
+        "quarter",
+        "day_of_week",
+        "day_of_week_name",
+        "is_weekend",
+        "week_of_year",
+        "month_name",
+        "quarter_name",
+        "year_quarter"
+    )
+
 
 def create_dim_visitor(df: DataFrame) -> DataFrame:
-    """Crea la dimensión de visitante"""
-    # Extraer el valor de customDimensions si existe
     custom_dim_value = when(
         size(col("customDimensions")) > 0,
         expr("element_at(transform(customDimensions, x -> x.value), 1)")
     ).otherwise(lit(None))
 
-    # Verificar si existe la estructura totals y el campo newVisits
-    is_new_visitor_value = lit(False)  # Valor predeterminado
-
+    is_new_visitor_value = lit(False)
     if "totals" in df.columns:
-        # Obtener las columnas disponibles en totals
         totals_columns = df.select("totals.*").columns
-
-        # Determinar el valor de is_new_visitor basado en totals.newVisits
         if "newVisits" in totals_columns:
-            # Crear una expresión para evaluar is_new_visitor
             is_new_visitor_value = when(
-                df["totals"]["newVisits"].isNotNull() & (df["totals"]["newVisits"] == "1"), 
-                lit(True)
+                df["totals"]["newVisits"] == "1", lit(True)
             ).otherwise(lit(False))
 
-    # Crear un DataFrame base con los campos básicos y el valor calculado de is_new_visitor
     visitor_df = df.select(
-        col("fullVisitorId").cast(StringType()).alias("full_visitor_id"),
+        col("fullVisitorId").cast(StringType()).alias("original_visitor_id"),
         col("visitNumber").alias("visit_number"),
         custom_dim_value.alias("custom_dimensions_value"),
         is_new_visitor_value.alias("is_new_visitor")
     )
 
-    # Generate visitor_id using SHA2 hash of concatenated fields
     return visitor_df.distinct().withColumn(
         "full_visitor_id",
-        sha2(concat_ws("|", 
-                      col("full_visitor_id"), 
-                      coalesce(col("visit_number"), lit("0")), 
-                      coalesce(col("custom_dimensions_value"), lit("unknown")), 
-                      col("is_new_visitor").cast(StringType())), 
-             256)
+        sha2(concat_ws("|",
+            col("original_visitor_id"),
+            coalesce(col("visit_number"), lit("0")),
+            coalesce(col("custom_dimensions_value"), lit("unknown")),
+            col("is_new_visitor").cast(StringType())
+        ), 256)
+    ).select(
+        "full_visitor_id",
+        "original_visitor_id",  # Incluir original_visitor_id para el join
+        "visit_number",
+        "custom_dimensions_value",
+        "is_new_visitor"
     )
 
 def create_dim_device(df: DataFrame) -> DataFrame:
@@ -223,13 +259,13 @@ def create_dim_device(df: DataFrame) -> DataFrame:
             lit("unknown").alias("device_category"),
             lit(False).alias("is_mobile")
         )
-        return devices.distinct().withColumn("device_id", 
-                                sha2(concat_ws("|", 
-                                              col("browser"), 
-                                              col("operating_system"), 
-                                              col("device_category"), 
-                                              col("is_mobile").cast(StringType())), 
-                                     256))
+        return devices.distinct().withColumn("device_id",
+                                             sha2(concat_ws("|",
+                                                            col("browser"),
+                                                            col("operating_system"),
+                                                            col("device_category"),
+                                                            col("is_mobile").cast(StringType())),
+                                                  256))
 
     # Obtener las columnas disponibles en device
     columns = df.select("device.*").columns
@@ -244,12 +280,12 @@ def create_dim_device(df: DataFrame) -> DataFrame:
 
     # Agregar el ID y devolver el DataFrame con todas las combinaciones únicas
     return devices_df.distinct().withColumn("device_id",
-                                         sha2(concat_ws("|", 
-                                                       col("browser"), 
-                                                       col("operating_system"), 
-                                                       col("device_category"), 
-                                                       col("is_mobile").cast(StringType())), 
-                                              256))
+                                            sha2(concat_ws("|",
+                                                           col("browser"),
+                                                           col("operating_system"),
+                                                           col("device_category"),
+                                                           col("is_mobile").cast(StringType())),
+                                                 256))
 
 
 def create_dim_geo(df: DataFrame) -> DataFrame:
@@ -263,28 +299,18 @@ def create_dim_geo(df: DataFrame) -> DataFrame:
         from pyspark.sql.functions import from_json, schema_of_json
         import json
 
-        # Verificar si geoNetwork es string (JSON sin parsear)
-        if isinstance(df.schema["geoNetwork"].dataType, StringType):
-
-            sample_json = json.dumps({"continent": "Asia", "country": "India", "region": "Delhi",
-                                      "city": "Mumbai", "networkDomain": "unknown.unknown"})
-            json_schema = schema_of_json(lit(sample_json))
-
-            df = df.withColumn("geoNetwork", from_json(col("geoNetwork"), json_schema))
-
         # Extract fields directly using dot notation for nested fields
         geo = df.select(
             coalesce(col("geoNetwork.continent"), lit("Unknown")).alias("continent"),
             coalesce(col("geoNetwork.country"), lit("Unknown")).alias("country"),
             coalesce(col("geoNetwork.region"), lit("Unknown")).alias("region"),
             coalesce(col("geoNetwork.city"), lit("Unknown")).alias("city"),
-            coalesce(col("geoNetwork.networkDomain"), lit("Unknown")).alias("network_domain")
         ).distinct()
 
         # Generate geo_id using SHA2 hash of concatenated fields
         geo = geo.withColumn(
-            "geo_id", 
-            sha2(concat_ws("|", col("continent"), col("country"), col("region"), col("city"), col("network_domain")), 256)
+            "geo_id",
+            sha2(concat_ws("|", col("continent"), col("country"), col("region"), col("city")), 256)
         )
 
         return geo
@@ -298,15 +324,16 @@ def create_default_geo(df: DataFrame) -> DataFrame:
     # Create a default geo DataFrame using the SparkSession from the input DataFrame
     spark = df.sparkSession
     default_geo = spark.createDataFrame(
-        [("Unknown", "Unknown", "Unknown", "Unknown", "Unknown")],
-        ["continent", "country", "region", "city", "network_domain"]
+        [("Unknown", "Unknown", "Unknown", "Unknown")],
+        ["continent", "country", "region", "city"]
     )
 
     # Generate geo_id using SHA2 hash of concatenated fields
     return default_geo.withColumn(
-        "geo_id", 
-        sha2(concat_ws("|", col("continent"), col("country"), col("region"), col("city"), col("network_domain")), 256)
+        "geo_id",
+        sha2(concat_ws("|", col("continent"), col("country"), col("region"), col("city")), 256)
     )
+
 
 def create_dim_channel(df: DataFrame) -> DataFrame:
     """Crea la dimensión de canal"""
@@ -314,8 +341,9 @@ def create_dim_channel(df: DataFrame) -> DataFrame:
         coalesce(col("channelGrouping"), lit("Unknown")).alias("channel_grouping")
     ).distinct()
 
-    return channel.withColumn("channel_id", 
-                             sha2(col("channel_grouping"), 256))
+    return channel.withColumn("channel_id",
+                              sha2(col("channel_grouping"), 256))
+
 
 def create_dim_traffic_source(df: DataFrame) -> DataFrame:
     """Crea la dimensión de fuente de tráfico"""
@@ -327,8 +355,8 @@ def create_dim_traffic_source(df: DataFrame) -> DataFrame:
             lit("Unknown").alias("medium"),
             lit("(not set)").alias("campaign")
         )
-        return traffic.distinct().withColumn("traffic_source_id", 
-                                sha2(concat_ws("|", col("source"), col("medium"), col("campaign")), 256))
+        return traffic.distinct().withColumn("traffic_source_id",
+                                             sha2(concat_ws("|", col("source"), col("medium"), col("campaign")), 256))
 
     # Obtener las columnas disponibles en trafficSource
     columns = df.select("trafficSource.*").columns
@@ -341,8 +369,9 @@ def create_dim_traffic_source(df: DataFrame) -> DataFrame:
     )
 
     # Agregar el ID y devolver el DataFrame con todas las combinaciones únicas
-    return traffic_df.distinct().withColumn("traffic_source_id", 
-                                         sha2(concat_ws("|", col("source"), col("medium"), col("campaign")), 256))
+    return traffic_df.distinct().withColumn("traffic_source_id",
+                                            sha2(concat_ws("|", col("source"), col("medium"), col("campaign")), 256))
+
 
 def create_dim_campaign(df: DataFrame) -> DataFrame:
     """Crea la dimensión de campaña"""
@@ -368,8 +397,9 @@ def create_dim_campaign(df: DataFrame) -> DataFrame:
             logger.warning(f"Could not access trafficSource structure: {e}")
             # Keep the default "(not set)" value already set
 
-    return campaign.distinct().withColumn("campaign_id", 
-                                sha2(col("campaign_name"), 256))
+    return campaign.distinct().withColumn("campaign_id",
+                                          sha2(col("campaign_name"), 256))
+
 
 def create_dim_product(df: DataFrame) -> DataFrame:
     """Crea la dimensión de producto"""
@@ -388,13 +418,13 @@ def create_dim_product(df: DataFrame) -> DataFrame:
         # Add product_id column
         return empty_df.withColumn(
             "product_id",
-            sha2(concat_ws("|", 
-                          col("product_sku"), 
-                          col("v2_product_name"), 
-                          col("v2_product_category"),
-                          col("product_brand"),
-                          col("product_variant"),
-                          col("product_price").cast(StringType())), 
+            sha2(concat_ws("|",
+                           col("product_sku"),
+                           col("v2_product_name"),
+                           col("v2_product_category"),
+                           col("product_brand"),
+                           col("product_variant"),
+                           col("product_price").cast(StringType())),
                  256)
         )
 
@@ -420,13 +450,13 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             # Add product_id column
             return empty_df.withColumn(
                 "product_id",
-                sha2(concat_ws("|", 
-                              col("product_sku"), 
-                              col("v2_product_name"), 
-                              col("v2_product_category"),
-                              col("product_brand"),
-                              col("product_variant"),
-                              col("product_price").cast(StringType())), 
+                sha2(concat_ws("|",
+                               col("product_sku"),
+                               col("v2_product_name"),
+                               col("v2_product_category"),
+                               col("product_brand"),
+                               col("product_variant"),
+                               col("product_price").cast(StringType())),
                      256)
             )
 
@@ -450,13 +480,13 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             # Add product_id column
             return empty_df.withColumn(
                 "product_id",
-                sha2(concat_ws("|", 
-                              col("product_sku"), 
-                              col("v2_product_name"), 
-                              col("v2_product_category"),
-                              col("product_brand"),
-                              col("product_variant"),
-                              col("product_price").cast(StringType())), 
+                sha2(concat_ws("|",
+                               col("product_sku"),
+                               col("v2_product_name"),
+                               col("v2_product_category"),
+                               col("product_brand"),
+                               col("product_variant"),
+                               col("product_price").cast(StringType())),
                      256)
             )
 
@@ -501,6 +531,7 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             lit(0.0).alias("product_price")
         ).where(lit(False))
 
+
 def create_dim_promotion(df: DataFrame) -> DataFrame:
     """Crea la dimensión de promoción"""
     # Verificar si la estructura hits existe
@@ -516,11 +547,11 @@ def create_dim_promotion(df: DataFrame) -> DataFrame:
         # Generate promo_id using SHA2 hash of concatenated fields
         return empty_df.withColumn(
             "promo_id",
-            sha2(concat_ws("|", 
-                          col("original_promo_id"), 
-                          col("promo_name"), 
-                          col("promo_creative"),
-                          col("promo_position")), 
+            sha2(concat_ws("|",
+                           col("original_promo_id"),
+                           col("promo_name"),
+                           col("promo_creative"),
+                           col("promo_position")),
                  256)
         )
 
@@ -544,11 +575,11 @@ def create_dim_promotion(df: DataFrame) -> DataFrame:
             # Generate promo_id using SHA2 hash of concatenated fields
             return empty_df.withColumn(
                 "promo_id",
-                sha2(concat_ws("|", 
-                              col("original_promo_id"), 
-                              col("promo_name"), 
-                              col("promo_creative"),
-                              col("promo_position")), 
+                sha2(concat_ws("|",
+                               col("original_promo_id"),
+                               col("promo_name"),
+                               col("promo_creative"),
+                               col("promo_position")),
                      256)
             )
 
@@ -590,13 +621,31 @@ def create_dim_promotion(df: DataFrame) -> DataFrame:
             lit("(not set)").alias("promo_position")
         ).where(lit(False))
 
+
 def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: DataFrame,
-                     dim_device_df: DataFrame, dim_geo_df: DataFrame, 
-                     dim_channel_df: DataFrame, dim_traffic_df: DataFrame) -> DataFrame:
+                       dim_device_df: DataFrame, dim_geo_df: DataFrame,
+                       dim_channel_df: DataFrame, dim_traffic_df: DataFrame) -> DataFrame:
     """Crea la tabla de hechos de visitas"""
     # Preparar datos base
     base_df = df.withColumn("visit_id", col("visitId").cast(IntegerType()))
 
+    custom_dim_value_fact = when(
+        size(col("customDimensions")) > 0,
+        expr("element_at(transform(customDimensions, x -> x.value), 1)")
+    ).otherwise(lit("unknown"))
+
+    base_df = df.withColumn("visit_id", col("visitId").cast(IntegerType())) \
+        .withColumn("network_domain", coalesce(col("geoNetwork.networkDomain"), lit("Unknown"))) \
+        .withColumn("is_new_visitor",
+                    when(col("totals.newVisits") == "1", lit(True)).otherwise(lit(False))) \
+        .withColumn("full_visitor_id",  # Generar hash aquí
+                    sha2(concat_ws("|",
+                                   col("fullVisitorId").cast(StringType()),
+                                   coalesce(col("visitNumber"), lit("0")),
+                                   coalesce(custom_dim_value_fact, lit("unknown")),
+                                   col("is_new_visitor").cast(StringType())
+                                   ), 256)
+                    )
     # Verificar si existe la columna totals
     columns = df.columns
     if "totals" in columns:
@@ -605,45 +654,49 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
 
         # Agregar columnas solo si existen en la estructura totals
         if "visits" in totals_fields:
-            base_df = base_df.withColumn("totals_visits", 
-                       when(col("totals.visits").isNotNull(), col("totals.visits").cast(IntegerType()))
-                       .otherwise(lit(0)))
+            base_df = base_df.withColumn("totals_visits",
+                                         when(col("totals.visits").isNotNull(),
+                                              col("totals.visits").cast(IntegerType()))
+                                         .otherwise(lit(0)))
         else:
             base_df = base_df.withColumn("totals_visits", lit(0))
 
         if "hits" in totals_fields:
-            base_df = base_df.withColumn("totals_hits", 
-                       when(col("totals.hits").isNotNull(), col("totals.hits").cast(IntegerType()))
-                       .otherwise(lit(0)))
+            base_df = base_df.withColumn("totals_hits",
+                                         when(col("totals.hits").isNotNull(), col("totals.hits").cast(IntegerType()))
+                                         .otherwise(lit(0)))
         else:
             base_df = base_df.withColumn("totals_hits", lit(0))
 
         if "pageviews" in totals_fields:
-            base_df = base_df.withColumn("totals_pageviews", 
-                       when(col("totals.pageviews").isNotNull(), col("totals.pageviews").cast(IntegerType()))
-                       .otherwise(lit(0)))
+            base_df = base_df.withColumn("totals_pageviews",
+                                         when(col("totals.pageviews").isNotNull(),
+                                              col("totals.pageviews").cast(IntegerType()))
+                                         .otherwise(lit(0)))
         else:
             base_df = base_df.withColumn("totals_pageviews", lit(0))
 
         if "bounces" in totals_fields:
-            base_df = base_df.withColumn("totals_bounces", 
-                       when(col("totals.bounces").isNotNull(), col("totals.bounces").cast(IntegerType()))
-                       .otherwise(lit(0)))
+            base_df = base_df.withColumn("totals_bounces",
+                                         when(col("totals.bounces").isNotNull(),
+                                              col("totals.bounces").cast(IntegerType()))
+                                         .otherwise(lit(0)))
         else:
             base_df = base_df.withColumn("totals_bounces", lit(0))
 
         if "timeOnSite" in totals_fields:
-            base_df = base_df.withColumn("totals_time_on_site", 
-                       when(col("totals.timeOnSite").isNotNull(), col("totals.timeOnSite").cast(IntegerType()))
-                       .otherwise(lit(0)))
+            base_df = base_df.withColumn("totals_time_on_site",
+                                         when(col("totals.timeOnSite").isNotNull(),
+                                              col("totals.timeOnSite").cast(IntegerType()))
+                                         .otherwise(lit(0)))
         else:
             base_df = base_df.withColumn("totals_time_on_site", lit(0))
 
         if "transactionRevenue" in totals_fields:
-            base_df = base_df.withColumn("totals_transaction_revenue", 
-                       when(col("totals.transactionRevenue").isNotNull(), 
-                            (col("totals.transactionRevenue").cast(DoubleType()) / 1000000))
-                       .otherwise(lit(0.0)))
+            base_df = base_df.withColumn("totals_transaction_revenue",
+                                         when(col("totals.transactionRevenue").isNotNull(),
+                                              (col("totals.transactionRevenue").cast(DoubleType()) / 1000000))
+                                         .otherwise(lit(0.0)))
         else:
             base_df = base_df.withColumn("totals_transaction_revenue", lit(0.0))
     else:
@@ -656,14 +709,33 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
             .withColumn("totals_transaction_revenue", lit(0.0))
 
     # Convertir socialEngagementType a un valor numérico
-    base_df = base_df.withColumn("social_engagement_type", 
-                                when(col("socialEngagementType") == "Socially Engaged", 1)
-                                .otherwise(0))
+    base_df = base_df.withColumn("social_engagement_type",
+                                 when(col("socialEngagementType") == "Socially Engaged", 1)
+                                 .otherwise(0))
 
     # Unir con dimensiones para obtener claves foráneas
     result = base_df \
-        .join(dim_time_df, base_df.date.cast(IntegerType()) == dim_time_df.date, "left") \
-        .join(dim_visitor_df, base_df.fullVisitorId.cast(StringType()) == dim_visitor_df.full_visitor_id, "left")
+        .join(dim_time_df, base_df["date"] == dim_time_df["date_int"], "left")
+
+    # FIX: Crear la misma combinación de campos para el join que se usa en dim_visitor
+    # Condición de unión actualizada incluyendo is_new_visitor
+    visitor_join_condition = (
+                                     base_df.fullVisitorId.cast(StringType()) == dim_visitor_df.original_visitor_id
+                             ) & (
+                                     base_df.visitNumber == dim_visitor_df.visit_number
+                             ) & (
+                                     coalesce(
+                                         when(
+                                             size(col("customDimensions")) > 0,
+                                             expr("element_at(transform(customDimensions, x -> x.value), 1)")
+                                         ).otherwise(lit(None)),
+                                         lit("unknown")
+                                     ) == coalesce(dim_visitor_df.custom_dimensions_value, lit("unknown"))
+                             ) & (
+                                     base_df.is_new_visitor == dim_visitor_df.is_new_visitor
+                             )
+
+    result = result.join(dim_visitor_df, visitor_join_condition, "left")
 
     # Verificar si existe la estructura device
     device_join_condition = lit("unknown") == dim_device_df.device_category
@@ -676,7 +748,8 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
             # Crear condiciones de join solo con las columnas que existen
             if "deviceCategory" in device_columns:
                 try:
-                    device_join_condition = coalesce(col("device.deviceCategory"), lit("unknown")) == dim_device_df.device_category
+                    device_join_condition = coalesce(col("device.deviceCategory"),
+                                                     lit("unknown")) == dim_device_df.device_category
                 except Exception as e:
                     logger.warning(f"Could not access device.deviceCategory in join: {e}")
                     # Keep the default join condition
@@ -706,18 +779,12 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
             if sample_dim_geo:
                 logger.info(f"Sample dim_geo data: {sample_dim_geo[0]}")
 
-            # Try to access specific fields directly to see if they exist
-            try:
-                continent_value = base_df.select("geoNetwork.continent").first()
-                logger.info(f"Direct access to geoNetwork.continent in create_fact_visits: {continent_value}")
-            except Exception as e:
-                logger.error(f"Error accessing geoNetwork.continent in create_fact_visits: {e}")
-
             # Crear una condición de join usando dot notation para acceder a los campos de geoNetwork
             geo_join_condition = (
-                coalesce(col("geoNetwork.continent"), lit("Unknown")) == dim_geo_df.continent
-            ) & (
-                coalesce(col("geoNetwork.country"), lit("Unknown")) == dim_geo_df.country
+                    (coalesce(col("geoNetwork.continent"), lit("Unknown")) == dim_geo_df.continent) &
+                    (coalesce(col("geoNetwork.country"), lit("Unknown")) == dim_geo_df.country) &
+                    (coalesce(col("geoNetwork.region"), lit("Unknown")) == dim_geo_df.region) &
+                    (coalesce(col("geoNetwork.city"), lit("Unknown")) == dim_geo_df.city)
             )
             logger.info("Using geoNetwork fields for join condition")
         except Exception as e:
@@ -739,20 +806,27 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
         base_df_with_geo = base_df
         if "geoNetwork" in base_df.columns:
             base_df_with_geo = base_df.withColumn("continent",
-                                                 coalesce(col("geoNetwork.continent"), lit("Unknown")))
+                                                  coalesce(col("geoNetwork.continent"), lit("Unknown")))
             base_df_with_geo = base_df_with_geo.withColumn("country",
-                                                          coalesce(col("geoNetwork.country"), lit("Unknown")))
-
+                                                           coalesce(col("geoNetwork.country"), lit("Unknown")))
+            base_df_with_geo = base_df_with_geo.withColumn("region",
+                                                           coalesce(col("geoNetwork.region"), lit("Unknown")))
+            base_df_with_geo = base_df_with_geo.withColumn("city",
+                                                           coalesce(col("geoNetwork.city"), lit("Unknown")))
 
             new_geo_join_condition = (
-                col("continent") == dim_geo_df.continent
-            ) & (
-                col("country") == dim_geo_df.country
-            )
+                                             col("continent") == dim_geo_df.continent
+                                     ) & (
+                                             col("country") == dim_geo_df.country
+                                     ) & (
+                                             col("region") == dim_geo_df.region
+                                     ) & (
+                                             col("city") == dim_geo_df.city
+                                     )
 
             # Add the extracted columns to the result DataFrame
             for column in base_df_with_geo.columns:
-                if column not in result.columns and column in ["continent", "country"]:
+                if column not in result.columns and column in ["continent", "country", "region", "city"]:
                     result = result.withColumn(column, base_df_with_geo[column])
 
             # Join using the new condition
@@ -800,7 +874,7 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
     # Continuar con el resto de joins
     result = result \
         .join(dim_channel_df,
-             coalesce(base_df.channelGrouping, lit("Unknown")) == dim_channel_df.channel_grouping, "left")
+              coalesce(base_df.channelGrouping, lit("Unknown")) == dim_channel_df.channel_grouping, "left")
 
     # Verificar si existe la estructura trafficSource
     traffic_join_condition = (lit("Unknown") == dim_traffic_df.source) & (lit("Unknown") == dim_traffic_df.medium)
@@ -815,7 +889,8 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
 
             if "source" in traffic_columns:
                 try:
-                    traffic_join_condition = traffic_join_condition & (coalesce(col("trafficSource.source"), lit("Unknown")) == dim_traffic_df.source)
+                    traffic_join_condition = traffic_join_condition & (
+                            coalesce(col("trafficSource.source"), lit("Unknown")) == dim_traffic_df.source)
                 except Exception as e:
                     logger.warning(f"Could not access trafficSource.source in join: {e}")
                     traffic_join_condition = traffic_join_condition & (lit("Unknown") == dim_traffic_df.source)
@@ -824,7 +899,8 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
 
             if "medium" in traffic_columns:
                 try:
-                    traffic_join_condition = traffic_join_condition & (coalesce(col("trafficSource.medium"), lit("Unknown")) == dim_traffic_df.medium)
+                    traffic_join_condition = traffic_join_condition & (
+                            coalesce(col("trafficSource.medium"), lit("Unknown")) == dim_traffic_df.medium)
                 except Exception as e:
                     logger.warning(f"Could not access trafficSource.medium in join: {e}")
                     traffic_join_condition = traffic_join_condition & (lit("Unknown") == dim_traffic_df.medium)
@@ -864,8 +940,10 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
             missing_geo_rows = result.filter(
                 col("geo_id").isNull() &
                 col("continent").isNotNull() &
-                col("country").isNotNull()
-            ).select("continent", "country").distinct().collect()
+                col("country").isNotNull() &
+                col("region").isNotNull() &
+                col("city").isNotNull()
+            ).select("continent", "country", "region", "city").distinct().collect()
 
             logger.info(f"Distinct geo values needing fix: {missing_geo_rows}")
 
@@ -873,11 +951,15 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
             for row in missing_geo_rows:
                 continent = row["continent"]
                 country = row["country"]
+                region = row["region"]
+                city = row["city"]
 
                 # Look up the geo_id in dim_geo_df
                 matching_geo = dim_geo_df.filter(
                     (col("continent") == continent) &
-                    (col("country") == country)
+                    (col("country") == country) &
+                    (col("region") == region) &
+                    (col("city") == city)
                 ).select("geo_id").first()
 
                 if matching_geo:
@@ -890,42 +972,38 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
                         when(
                             (col("geo_id").isNull()) &
                             (col("continent") == continent) &
-                            (col("country") == country),
+                            (col("country") == country) &
+                            (col("region") == region) &
+                            (col("city") == city),
                             lit(geo_id)
                         ).otherwise(col("geo_id"))
                     )
                 else:
-                    logger.warning(f"No matching geo_id found for {continent}/{country}")
-
-                    # Create a new entry in dim_geo_df for this geo
-                    # Note: This is just for logging, we can't actually modify dim_geo_df here
-                    logger.info(f"Would create new dim_geo entry for {continent}/{country}")
-
                     # For now, use a default geo_id of 1
                     result = result.withColumn(
                         "geo_id",
                         when(
                             (col("geo_id").isNull()) &
                             (col("continent") == continent) &
-                            (col("country") == country),
-                            lit(1)  # Default geo_id
+                            (col("country") == country) &
+                            (col("region") == region) &
+                            (col("city") == city),
+                            lit(1)
                         ).otherwise(col("geo_id"))
                     )
 
-            # Log the fix
-            logger.info("Applied fix for NULL geo_id values")
-    else:
-        logger.warning("Geo columns not found in result DataFrame")
-
     # Seleccionar columnas finales para la tabla de hechos
+    # Asegurarse de usar el full_visitor_id de la dimensión visitor después del join
+    # Usar coalesce para manejar casos donde no hay coincidencia en la dimensión visitor
     return result.select(
         col("visit_id"),
         col("time_id"),
-        col("full_visitor_id"),
+        coalesce(dim_visitor_df["full_visitor_id"], base_df["full_visitor_id"]).alias("full_visitor_id"),
         col("device_id"),
         col("geo_id"),
         col("channel_id"),
         col("traffic_source_id"),
+        col("network_domain"),
         col("totals_visits"),
         col("social_engagement_type"),
         col("totals_hits"),
@@ -934,6 +1012,7 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
         col("totals_time_on_site"),
         col("totals_transaction_revenue")
     )
+
 
 def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_product_df: DataFrame) -> DataFrame:
     """Crea la tabla de relación entre visitas y productos"""
@@ -995,17 +1074,14 @@ def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_pr
         visit_products = exploded_products.select(col("visit_id"))
 
         # Agregar columnas solo si existen
-        if "productSKU" in product_columns:
-            visit_products = visit_products.withColumn("product_sku", col("product.productSKU"))
-        else:
-            visit_products = visit_products.withColumn("product_sku", lit("UNKNOWN_SKU"))
+        visit_products = visit_products.withColumn("product_id", col("product.product_id"))
 
         # Asumimos cantidad 1 por defecto
         visit_products = visit_products.withColumn("quantity", lit(1))
 
         if "localProductPrice" in product_columns:
             visit_products = visit_products.withColumn(
-                "local_product_price", 
+                "local_product_price",
                 (col("product.localProductPrice").cast(DoubleType()) / 1000000)
             )
         else:
@@ -1013,7 +1089,7 @@ def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_pr
 
         if "isImpression" in product_columns:
             visit_products = visit_products.withColumn(
-                "is_impression", 
+                "is_impression",
                 coalesce(col("product.isImpression"), lit(False))
             )
         else:
@@ -1021,7 +1097,7 @@ def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_pr
 
         if "productListPosition" in product_columns:
             visit_products = visit_products.withColumn(
-                "product_list_position", 
+                "product_list_position",
                 col("product.productListPosition").cast(IntegerType())
             )
         else:
@@ -1029,7 +1105,7 @@ def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_pr
 
         if "productCouponCode" in product_columns:
             visit_products = visit_products.withColumn(
-                "product_coupon_code", 
+                "product_coupon_code",
                 coalesce(col("product.productCouponCode"), lit(None))
             )
         else:
@@ -1056,6 +1132,7 @@ def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_pr
             lit(0).cast(IntegerType()).alias("product_list_position"),
             lit(None).cast(StringType()).alias("product_coupon_code")
         ).where(lit(False))
+
 
 def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_promotion_df: DataFrame) -> DataFrame:
     """Crea la tabla de relación entre visitas y promociones"""
@@ -1130,7 +1207,7 @@ def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_
 
             if "promoIsView" in promo_action_columns:
                 visit_promos = visit_promos.withColumn(
-                    "promo_is_view", 
+                    "promo_is_view",
                     coalesce(col("promo_action.promoIsView"), lit(False))
                 )
             else:
@@ -1138,7 +1215,7 @@ def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_
 
             if "promoIsClick" in promo_action_columns:
                 visit_promos = visit_promos.withColumn(
-                    "promo_is_click", 
+                    "promo_is_click",
                     coalesce(col("promo_action.promoIsClick"), lit(False))
                 )
             else:
@@ -1150,12 +1227,12 @@ def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_
 
         # Unir con la tabla de hechos para asegurar que solo incluimos visitas válidas
         return visit_promos.join(
-            fact_visits_df.select("visit_id"), 
-            "visit_id", 
+            fact_visits_df.select("visit_id"),
+            "visit_id",
             "inner"
         ).join(
-            dim_promotion_df.select("promo_id"), 
-            "promo_id", 
+            dim_promotion_df.select("promo_id"),
+            "promo_id",
             "inner"
         )
     except Exception as e:
