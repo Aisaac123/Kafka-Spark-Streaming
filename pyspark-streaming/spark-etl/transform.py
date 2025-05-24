@@ -117,7 +117,7 @@ def create_empty_dataframe(spark: SparkSession) -> dict:
     """Crea un DataFrame vacío con la estructura correcta"""
     # Crear dimensiones vacías
     dim_time_schema = "time_id STRING, date_int INT, full_date DATE, day INT, month INT,  year INT, quarter INT, day_of_week INT, day_of_week_name STRING, is_weekend BOOLEAN, week_of_year INT, month_name STRING, quarter_name STRING, year_quarter STRING",
-    dim_visitor_schema = "full_visitor_id STRING, original_visitor_id STRING, visit_number INT, custom_dimensions_value STRING, is_new_visitor BOOLEAN"
+    dim_visitor_schema = "full_visitor_id STRING, original_visitor_id STRING, custom_dimensions_value STRING, is_new_visitor BOOLEAN"
     dim_device_schema = "device_id STRING, browser STRING, operating_system STRING, device_category STRING, is_mobile BOOLEAN"
     dim_geo_schema = "geo_id STRING, continent STRING, country STRING, region STRING, city STRING"
     dim_channel_schema = "channel_id STRING, channel_grouping STRING"
@@ -227,7 +227,6 @@ def create_dim_visitor(df: DataFrame) -> DataFrame:
 
     visitor_df = df.select(
         col("fullVisitorId").cast(StringType()).alias("original_visitor_id"),
-        col("visitNumber").alias("visit_number"),
         custom_dim_value.alias("custom_dimensions_value"),
         is_new_visitor_value.alias("is_new_visitor")
     )
@@ -236,14 +235,12 @@ def create_dim_visitor(df: DataFrame) -> DataFrame:
         "full_visitor_id",
         sha2(concat_ws("|",
             col("original_visitor_id"),
-            coalesce(col("visit_number"), lit("0")),
             coalesce(col("custom_dimensions_value"), lit("unknown")),
             col("is_new_visitor").cast(StringType())
         ), 256)
     ).select(
         "full_visitor_id",
         "original_visitor_id",  # Incluir original_visitor_id para el join
-        "visit_number",
         "custom_dimensions_value",
         "is_new_visitor"
     )
