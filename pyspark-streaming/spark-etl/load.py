@@ -171,7 +171,7 @@ def _write_csv_file(df: DataFrame, path: str, table_name: str) -> None:
            .write
            .mode("overwrite")
            .option("header", "true" if header else "false")
-           .option("delimiter", "|")
+           .option("delimiter", ",")
            .option("encoding", "UTF-8")
            .csv(os.path.dirname(final_path)))
 
