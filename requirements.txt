@@ -1,0 +1,7 @@
+pyspark
+pyspark-stubs
+kafka-python
+numpy
+cryptography
+pycparser
+

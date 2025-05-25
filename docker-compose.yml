@@ -1,12 +1,11 @@
-version: '2'
 services:
   ed-pyspark-jupyter:
     image: easewithdata/pyspark-jupyter-lab
     user: root
     container_name: ed-pyspark-jupyter-lab
     ports:
-      - 8888:8888
-      - 4040:4040
+      - "8888:8888"
+      - "4040:4040"
     environment:
       JUPYTER_PORT: 8888
       SPARK_UI_PORT: 4040
@@ -14,12 +13,14 @@ services:
     volumes:
       - streaming_data:/data:rw
       - ./pyspark-streaming/consume/spark-consume.py:/home/jupyter/spark-consume.py:ro
+      - ./pyspark-streaming/spark-etl:/home/jupyter/spark-etl:rw
+      - ./data_warehouse:/home/jupyter/spark-etl/data/warehouse:rw
 
   ed-zookeeper:
     image: confluentinc/cp-zookeeper:latest
     container_name: ed-zookeeper
     ports:
-      - 2181:2181
+      - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -30,7 +31,7 @@ services:
     depends_on:
       - ed-zookeeper
     ports:
-      - 9092:9092
+      - "9092:9092"
     volumes:
       - streaming_data:/data:rw
     environment:
@@ -40,8 +41,20 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_CREATE_TOPICS: "ventas:50:1" # Crea 50 particiones con factor de replicacion de 1
+      KAFKA_CREATE_TOPICS: "visits:50:1"
+
+  ed-postgres:
+    image: postgres:latest
+    container_name: ed-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: spark_results
+      POSTGRES_USER: spark
+      POSTGRES_PASSWORD: root
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
 volumes:
   streaming_data:
-
+  postgres_data:
