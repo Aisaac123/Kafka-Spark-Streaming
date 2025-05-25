@@ -14,7 +14,7 @@ services:
       - streaming_data:/data:rw
       - ./pyspark-streaming/consume/spark-consume.py:/home/jupyter/spark-consume.py:ro
       - ./pyspark-streaming/spark-etl:/home/jupyter/spark-etl:rw
-      - ./data_warehouse:/home/jupyter/spark-etl:rw
+      - ./data_warehouse:/home/jupyter/spark-etl/data/warehouse:rw
 
   ed-zookeeper:
     image: confluentinc/cp-zookeeper:latest
