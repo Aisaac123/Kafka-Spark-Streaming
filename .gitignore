@@ -29,7 +29,6 @@ var/
 
 # Hadoop
 /tmp/hdfs/
-hadoop-hive.env
 
 # Docker
 .docker/
