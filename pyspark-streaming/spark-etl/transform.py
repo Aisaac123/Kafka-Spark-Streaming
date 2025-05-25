@@ -87,7 +87,7 @@ def transform_data(df: DataFrame, spark: SparkSession) -> DataFrame:
 
         # 4. Eliminar duplicados
         fact_visits_df = fact_visits_df.dropDuplicates(["visit_id"])
-        fact_visits_products_df = fact_visits_products_df.dropDuplicates(["visit_id", "product_sku"])
+        fact_visits_products_df = fact_visits_products_df.dropDuplicates(["visit_id", "product_id"])
         fact_visits_promotions_df = fact_visits_promotions_df.dropDuplicates(["visit_id", "promo_id"])
 
         # 5. Unir todas las tablas en un único DataFrame
@@ -122,7 +122,7 @@ def create_empty_dataframe(spark: SparkSession) -> dict:
     dim_geo_schema = "geo_id STRING, continent STRING, country STRING, region STRING, city STRING"
     dim_channel_schema = "channel_id STRING, channel_grouping STRING"
     dim_traffic_schema = "traffic_source_id STRING, source STRING, medium STRING, campaign STRING"
-    dim_product_schema = "product_id STRING, product_sku STRING, v2_product_name STRING, v2_product_category STRING, product_brand STRING, product_variant STRING, product_price DOUBLE"
+    dim_product_schema = "product_id STRING, product_sku STRING, v2_product_name STRING, product_brand STRING, product_variant STRING, product_price DOUBLE"
     dim_promotion_schema = "promo_id STRING, promo_name STRING, promo_creative STRING, promo_position STRING"
 
     # Crear fact table vacía
@@ -406,7 +406,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
         empty_df = df.select(
             lit("EMPTY_SKU").alias("product_sku"),
             lit("Empty Product").alias("v2_product_name"),
-            lit("Empty Category").alias("v2_product_category"),
             lit("(not set)").alias("product_brand"),
             lit("(not set)").alias("product_variant"),
             lit(0.0).alias("product_price")
@@ -418,7 +417,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             sha2(concat_ws("|",
                            col("product_sku"),
                            col("v2_product_name"),
-                           col("v2_product_category"),
                            col("product_brand"),
                            col("product_variant"),
                            col("product_price").cast(StringType())),
@@ -438,7 +436,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             empty_df = df.select(
                 lit("EMPTY_SKU").alias("product_sku"),
                 lit("Empty Product").alias("v2_product_name"),
-                lit("Empty Category").alias("v2_product_category"),
                 lit("(not set)").alias("product_brand"),
                 lit("(not set)").alias("product_variant"),
                 lit(0.0).alias("product_price")
@@ -450,7 +447,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
                 sha2(concat_ws("|",
                                col("product_sku"),
                                col("v2_product_name"),
-                               col("v2_product_category"),
                                col("product_brand"),
                                col("product_variant"),
                                col("product_price").cast(StringType())),
@@ -468,7 +464,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             empty_df = df.select(
                 lit("EMPTY_SKU").alias("product_sku"),
                 lit("Empty Product").alias("v2_product_name"),
-                lit("Empty Category").alias("v2_product_category"),
                 lit("(not set)").alias("product_brand"),
                 lit("(not set)").alias("product_variant"),
                 lit(0.0).alias("product_price")
@@ -480,7 +475,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
                 sha2(concat_ws("|",
                                col("product_sku"),
                                col("v2_product_name"),
-                               col("v2_product_category"),
                                col("product_brand"),
                                col("product_variant"),
                                col("product_price").cast(StringType())),
@@ -495,7 +489,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
         products = exploded_products.select(
             coalesce(col("product.productSKU"), lit("UNKNOWN_SKU")).alias("product_sku"),
             coalesce(col("product.v2ProductName"), lit("Unknown Product")).alias("v2_product_name"),
-            coalesce(col("product.v2ProductCategory"), lit("Unknown Category")).alias("v2_product_category"),
             coalesce(col("product.productBrand"), lit("(not set)")).alias("product_brand"),
             coalesce(col("product.productVariant"), lit("(not set)")).alias("product_variant"),
             (coalesce(col("product.productPrice").cast(DoubleType()), lit(0.0)) / 1000000).alias("product_price")
@@ -508,7 +501,6 @@ def create_dim_product(df: DataFrame) -> DataFrame:
                 concat_ws("|",
                           col("product_sku"),
                           col("v2_product_name"),
-                          col("v2_product_category"),
                           col("product_brand"),
                           col("product_variant"),
                           col("product_price").cast(StringType())
@@ -522,102 +514,10 @@ def create_dim_product(df: DataFrame) -> DataFrame:
         return df.select(
             lit("ERROR_SKU").alias("product_sku"),
             lit("Error Product").alias("v2_product_name"),
-            lit("Error Category").alias("v2_product_category"),
             lit("(not set)").alias("product_brand"),
             lit("(not set)").alias("product_variant"),
             lit(0.0).alias("product_price")
         ).where(lit(False))
-
-
-def create_dim_promotion(df: DataFrame) -> DataFrame:
-    """Crea la dimensión de promoción"""
-    # Verificar si la estructura hits existe
-    if "hits" not in df.columns:
-        # Si no existe, crear un DataFrame vacío con la estructura correcta
-        empty_df = df.select(
-            lit("EMPTY_PROMO").alias("original_promo_id"),
-            lit("(not set)").alias("promo_name"),
-            lit("(not set)").alias("promo_creative"),
-            lit("(not set)").alias("promo_position")
-        ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
-
-        # Generate promo_id using SHA2 hash of concatenated fields
-        return empty_df.withColumn(
-            "promo_id",
-            sha2(concat_ws("|",
-                           col("original_promo_id"),
-                           col("promo_name"),
-                           col("promo_creative"),
-                           col("promo_position")),
-                 256)
-        )
-
-    try:
-        # Explotar el array de hits y luego el array de promociones
-        exploded_hits = df.select(
-            col("visitId").cast(IntegerType()).alias("visit_id"),
-            explode(col("hits")).alias("hit")
-        )
-
-        # Verificar si el campo promotion existe en los hits
-        hit_columns = exploded_hits.select("hit.*").columns
-        if "promotion" not in hit_columns:
-            empty_df = df.select(
-                lit("EMPTY_PROMO").alias("original_promo_id"),
-                lit("(not set)").alias("promo_name"),
-                lit("(not set)").alias("promo_creative"),
-                lit("(not set)").alias("promo_position")
-            ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
-
-            # Generate promo_id using SHA2 hash of concatenated fields
-            return empty_df.withColumn(
-                "promo_id",
-                sha2(concat_ws("|",
-                               col("original_promo_id"),
-                               col("promo_name"),
-                               col("promo_creative"),
-                               col("promo_position")),
-                     256)
-            )
-
-        # Explotar las promociones dentro de cada hit
-        exploded_promos = exploded_hits.select(
-            col("visit_id"),
-            explode(col("hit.promotion")).alias("promotion")
-        ).filter(col("promotion").isNotNull())
-
-        # Si no hay promociones, devolver un DataFrame vacío
-        if exploded_promos.isEmpty():
-            return df.select(
-                lit("EMPTY_PROMO").alias("promo_id"),
-                lit("(not set)").alias("promo_name"),
-                lit("(not set)").alias("promo_creative"),
-                lit("(not set)").alias("promo_position")
-            ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
-
-        # Obtener las columnas disponibles en promotion
-        promo_columns = exploded_promos.select("promotion.*").columns
-
-        # Crear un DataFrame con todas las combinaciones únicas de promociones
-        # Usar coalesce para manejar valores nulos y proporcionar valores predeterminados
-        promotions = exploded_promos.select(
-            coalesce(col("promotion.promoId"), lit("UNKNOWN_PROMO")).alias("promo_id"),
-            coalesce(col("promotion.promoName"), lit("(not set)")).alias("promo_name"),
-            coalesce(col("promotion.promoCreative"), lit("(not set)")).alias("promo_creative"),
-            coalesce(col("promotion.promoPosition"), lit("(not set)")).alias("promo_position")
-        )
-
-        # Devolver el DataFrame con todas las combinaciones únicas
-        return promotions.distinct()
-    except Exception as e:
-        # En caso de error, devolver un DataFrame vacío con la estructura correcta
-        return df.select(
-            lit("ERROR_PROMO").alias("promo_id"),
-            lit("(not set)").alias("promo_name"),
-            lit("(not set)").alias("promo_creative"),
-            lit("(not set)").alias("promo_position")
-        ).where(lit(False))
-
 
 def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: DataFrame,
                        dim_device_df: DataFrame, dim_geo_df: DataFrame,
@@ -994,218 +894,122 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
 
 
 def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_product_df: DataFrame) -> DataFrame:
-    """Crea la tabla de relación entre visitas y productos"""
-    # Verificar si la estructura hits existe
-    if "hits" not in df.columns:
-        # Si no existe, crear un DataFrame vacío con la estructura correcta
-        return df.select(
-            lit(0).cast(IntegerType()).alias("visit_id"),
-            lit("EMPTY_SKU").alias("product_sku"),
-            lit(0).cast(IntegerType()).alias("quantity"),
-            lit(0.0).cast(DoubleType()).alias("local_product_price"),
-            lit(False).cast(BooleanType()).alias("is_impression"),
-            lit(0).cast(IntegerType()).alias("product_list_position"),
-            lit(None).cast(StringType()).alias("product_coupon_code")
-        ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
-
+    """Crea la tabla de relación visitas-productos incluyendo v2_product_category desde el JSON"""
     try:
-        # Explotar el array de hits y luego el array de productos
+        # Explotar hits y productos
         exploded_hits = df.select(
             col("visitId").cast(IntegerType()).alias("visit_id"),
             explode(col("hits")).alias("hit")
         )
-
-        # Verificar si el campo product existe en los hits
-        hit_columns = exploded_hits.select("hit.*").columns
-        if "product" not in hit_columns:
-            return df.select(
-                lit(0).cast(IntegerType()).alias("visit_id"),
-                lit("EMPTY_SKU").alias("product_sku"),
-                lit(0).cast(IntegerType()).alias("quantity"),
-                lit(0.0).cast(DoubleType()).alias("local_product_price"),
-                lit(False).cast(BooleanType()).alias("is_impression"),
-                lit(0).cast(IntegerType()).alias("product_list_position"),
-                lit(None).cast(StringType()).alias("product_coupon_code")
-            ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
-
-        # Explotar los productos dentro de cada hit
         exploded_products = exploded_hits.select(
             col("visit_id"),
             explode(col("hit.product")).alias("product")
         ).filter(col("product").isNotNull())
 
-        # Si no hay productos, devolver un DataFrame vacío
-        if exploded_products.isEmpty():
-            return df.select(
-                lit(0).cast(IntegerType()).alias("visit_id"),
-                lit("EMPTY_SKU").alias("product_sku"),
-                lit(0).cast(IntegerType()).alias("quantity"),
-                lit(0.0).cast(DoubleType()).alias("local_product_price"),
-                lit(False).cast(BooleanType()).alias("is_impression"),
-                lit(0).cast(IntegerType()).alias("product_list_position"),
-                lit(None).cast(StringType()).alias("product_coupon_code")
-            ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
+        # Extraer campos del producto (incluyendo v2_product_category)
+        visit_products = exploded_products.select(
+            col("visit_id"),
+            col("product.productSKU").alias("product_sku"),
+            coalesce(col("product.v2ProductCategory"), lit("(not set)")).alias("v2_product_category"),  # <-- Extraer del JSON
+            (coalesce(col("product.localProductPrice").cast(DoubleType()), lit(0.0)) / 1000000).alias("local_product_price"),
+            coalesce(col("product.isImpression"), lit(False)).alias("is_impression"),
+            coalesce(col("product.productListPosition").cast(IntegerType()), lit(0)).alias("product_list_position"),
+            coalesce(col("product.productCouponCode"), lit(None)).alias("product_coupon_code")
+        )
 
-        # Obtener las columnas disponibles en product
-        product_columns = exploded_products.select("product.*").columns
-
-        # Crear un DataFrame base con valores predeterminados
-        visit_products = exploded_products.select(col("visit_id"))
-
-        # Agregar columnas solo si existen
-        visit_products = visit_products.withColumn("product_id", col("product.product_id"))
-
-        # Asumimos cantidad 1 por defecto
-        visit_products = visit_products.withColumn("quantity", lit(1))
-
-        if "localProductPrice" in product_columns:
-            visit_products = visit_products.withColumn(
-                "local_product_price",
-                (col("product.localProductPrice").cast(DoubleType()) / 1000000)
-            )
-        else:
-            visit_products = visit_products.withColumn("local_product_price", lit(0.0))
-
-        if "isImpression" in product_columns:
-            visit_products = visit_products.withColumn(
-                "is_impression",
-                coalesce(col("product.isImpression"), lit(False))
-            )
-        else:
-            visit_products = visit_products.withColumn("is_impression", lit(False))
-
-        if "productListPosition" in product_columns:
-            visit_products = visit_products.withColumn(
-                "product_list_position",
-                col("product.productListPosition").cast(IntegerType())
-            )
-        else:
-            visit_products = visit_products.withColumn("product_list_position", lit(0))
-
-        if "productCouponCode" in product_columns:
-            visit_products = visit_products.withColumn(
-                "product_coupon_code",
-                coalesce(col("product.productCouponCode"), lit(None))
-            )
-        else:
-            visit_products = visit_products.withColumn("product_coupon_code", lit(None))
-
-        # Unir con la tabla de hechos para asegurar que solo incluimos visitas válidas
-        return visit_products.join(
-            fact_visits_df.select("visit_id"),
-            "visit_id",
-            "inner"
-        ).join(
-            dim_product_df.select("product_sku"),
+        # Unir con dim_product para obtener product_id
+        visit_products = visit_products.join(
+            dim_product_df.select("product_sku", "product_id"),
             "product_sku",
             "inner"
         )
+
+        # Unir con fact_visits para validar visitas
+        visit_products = visit_products.join(
+            fact_visits_df.select("visit_id"),
+            "visit_id",
+            "inner"
+        )
+
+        # Seleccionar campos finales (incluir v2_product_category)
+        return visit_products.select(
+            "visit_id",
+            "product_id",
+            "v2_product_category",  # <-- Incluir campo
+            lit(1).alias("quantity"),
+            "local_product_price",
+            "is_impression",
+            "product_list_position",
+            "product_coupon_code"
+        )
+
     except Exception as e:
-        # En caso de error, devolver un DataFrame vacío con la estructura correcta
-        return df.select(
-            lit(0).cast(IntegerType()).alias("visit_id"),
-            lit("ERROR_SKU").alias("product_sku"),
-            lit(0).cast(IntegerType()).alias("quantity"),
-            lit(0.0).cast(DoubleType()).alias("local_product_price"),
-            lit(False).cast(BooleanType()).alias("is_impression"),
-            lit(0).cast(IntegerType()).alias("product_list_position"),
-            lit(None).cast(StringType()).alias("product_coupon_code")
-        ).where(lit(False))
+        logger.error(f"Error en create_fact_visits_products: {str(e)}")
 
-
-def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_promotion_df: DataFrame) -> DataFrame:
-    """Crea la tabla de relación entre visitas y promociones"""
-    # Verificar si la estructura hits existe
-    if "hits" not in df.columns:
-        # Si no existe, crear un DataFrame vacío con la estructura correcta
-        return df.select(
-            lit(0).cast(IntegerType()).alias("visit_id"),
-            lit("EMPTY_PROMO").alias("promo_id"),
-            lit(False).cast(BooleanType()).alias("promo_is_view"),
-            lit(False).cast(BooleanType()).alias("promo_is_click")
-        ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
-
+def create_dim_promotion(df: DataFrame) -> DataFrame:
+    """Crea la dimensión de promoción usando promoId del JSON como clave primaria"""
     try:
-        # Explotar el array de hits y luego el array de promociones
+        # Explotar hits y promociones
         exploded_hits = df.select(
             col("visitId").cast(IntegerType()).alias("visit_id"),
             explode(col("hits")).alias("hit")
         )
 
-        # Verificar si el campo promotion existe en los hits
-        hit_columns = exploded_hits.select("hit.*").columns
-        if "promotion" not in hit_columns:
-            return df.select(
-                lit(0).cast(IntegerType()).alias("visit_id"),
-                lit("EMPTY_PROMO").alias("promo_id"),
-                lit(False).cast(BooleanType()).alias("promo_is_view"),
-                lit(False).cast(BooleanType()).alias("promo_is_click")
-            ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
+        exploded_promos = exploded_hits.select(
+            col("visit_id"),
+            explode(col("hit.promotion")).alias("promotion")
+        ).filter(col("promotion").isNotNull())
 
-        # Verificar si existe el campo promotionActionInfo
-        has_promo_action = "promotionActionInfo" in hit_columns
+        # Extraer campos de la promoción (usar promoId directamente)
+        promotions = exploded_promos.select(
+            coalesce(col("promotion.promoId"), lit("UNKNOWN_PROMO")).alias("promo_id"),
+            coalesce(col("promotion.promoName"), lit("(not set)")).alias("promo_name"),
+            coalesce(col("promotion.promoCreative"), lit("(not set)")).alias("promo_creative"),
+            coalesce(col("promotion.promoPosition"), lit("(not set)")).alias("promo_position")
+        ).distinct()
 
-        # Explotar las promociones dentro de cada hit
-        if has_promo_action:
-            exploded_promos = exploded_hits.select(
-                col("visit_id"),
-                explode(col("hit.promotion")).alias("promotion"),
-                col("hit.promotionActionInfo").alias("promo_action")
-            ).filter(col("promotion").isNotNull())
-        else:
-            exploded_promos = exploded_hits.select(
-                col("visit_id"),
-                explode(col("hit.promotion")).alias("promotion")
-            ).filter(col("promotion").isNotNull())
+        return promotions
 
-        # Si no hay promociones, devolver un DataFrame vacío
-        if exploded_promos.isEmpty():
-            return df.select(
-                lit(0).cast(IntegerType()).alias("visit_id"),
-                lit("EMPTY_PROMO").alias("promo_id"),
-                lit(False).cast(BooleanType()).alias("promo_is_view"),
-                lit(False).cast(BooleanType()).alias("promo_is_click")
-            ).where(lit(False))  # Crear un DataFrame vacío con la estructura correcta
+    except Exception as e:
+        logger.error(f"Error creando dim_promotion: {str(e)}")
+        # Devolver DataFrame vacío con esquema correcto
 
-        # Obtener las columnas disponibles en promotion
-        promo_columns = exploded_promos.select("promotion.*").columns
 
-        # Crear un DataFrame base con valores predeterminados
-        visit_promos = exploded_promos.select(col("visit_id"))
+def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_promotion_df: DataFrame) -> DataFrame:
+    """Crea fact_visits_promotions usando promoIsView/promoIsClick del hit, no de cada promoción"""
+    try:
+        # Explotar hits y obtener promoActionInfo
+        exploded_hits = df.select(
+            col("visitId").cast(IntegerType()).alias("visit_id"),
+            explode(col("hits")).alias("hit")
+        )
 
-        # Agregar columnas solo si existen
-        if "promoId" in promo_columns:
-            visit_promos = visit_promos.withColumn("promo_id", col("promotion.promoId"))
-        else:
-            visit_promos = visit_promos.withColumn("promo_id", lit("UNKNOWN_PROMO"))
+        # Extraer promoIsView y promoIsClick del hit (no de cada promoción)
+        hits_with_promo_actions = exploded_hits.select(
+            col("visit_id"),
+            col("hit.promotion").alias("promotions"),
+            coalesce(col("hit.promotionActionInfo.promoIsView"), lit(False)).alias("promo_is_view"),
+            coalesce(col("hit.promotionActionInfo.promoIsClick"), lit(False)).alias("promo_is_click")
+        )
 
-        # Agregar campos de acción de promoción si existe promotionActionInfo
-        if has_promo_action:
-            # Obtener las columnas disponibles en promo_action
-            promo_action_columns = exploded_promos.select("promo_action.*").columns if has_promo_action else []
+        # Explotar promociones y unir con las acciones
+        exploded_promos = hits_with_promo_actions.select(
+            col("visit_id"),
+            explode(col("promotions")).alias("promotion"),
+            col("promo_is_view"),
+            col("promo_is_click")
+        )
 
-            if "promoIsView" in promo_action_columns:
-                visit_promos = visit_promos.withColumn(
-                    "promo_is_view",
-                    coalesce(col("promo_action.promoIsView"), lit(False))
-                )
-            else:
-                visit_promos = visit_promos.withColumn("promo_is_view", lit(False))
+        # Extraer promoId y unir con dim_promotion
+        visit_promos = exploded_promos.select(
+            col("visit_id"),
+            coalesce(col("promotion.promoId"), lit("UNKNOWN_PROMO")).alias("promo_id"),
+            col("promo_is_view"),
+            col("promo_is_click")
+        )
 
-            if "promoIsClick" in promo_action_columns:
-                visit_promos = visit_promos.withColumn(
-                    "promo_is_click",
-                    coalesce(col("promo_action.promoIsClick"), lit(False))
-                )
-            else:
-                visit_promos = visit_promos.withColumn("promo_is_click", lit(False))
-        else:
-            # Si no existe promotionActionInfo, usar valores predeterminados
-            visit_promos = visit_promos.withColumn("promo_is_view", lit(False))
-            visit_promos = visit_promos.withColumn("promo_is_click", lit(False))
-
-        # Unir con la tabla de hechos para asegurar que solo incluimos visitas válidas
-        return visit_promos.join(
+        # Validar claves con dimensiones
+        visit_promos = visit_promos.join(
             fact_visits_df.select("visit_id"),
             "visit_id",
             "inner"
@@ -1214,11 +1018,9 @@ def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_
             "promo_id",
             "inner"
         )
+
+        return visit_promos.select("visit_id", "promo_id", "promo_is_view", "promo_is_click")
+
     except Exception as e:
-        # En caso de error, devolver un DataFrame vacío con la estructura correcta
-        return df.select(
-            lit(0).cast(IntegerType()).alias("visit_id"),
-            lit("ERROR_PROMO").alias("promo_id"),
-            lit(False).cast(BooleanType()).alias("promo_is_view"),
-            lit(False).cast(BooleanType()).alias("promo_is_click")
-        ).where(lit(False))
+        logger.error(f"Error en create_fact_visits_promotions: {str(e)}")
+        # Devolver DataFrame vacío con esquema correcto

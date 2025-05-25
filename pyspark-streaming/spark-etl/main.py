@@ -49,27 +49,6 @@ def setup_kafka_stream(spark, topic, partitions, bootstrap_servers="ed-kafka:290
     return raw_df
 
 
-def process_batch(df, batch_id, spark, jdbc_url, db_properties):
-    """Procesa cada batch procedente de Kafka"""
-    logger.info(f"🔄 Batch {batch_id}: procesando")
-    if df.isEmpty():
-        logger.info(f"⏭️ Batch {batch_id} vacío, omitido")
-        return
-
-    try:
-        extracted = extract_data(df, spark)
-        if extracted.isEmpty():
-            logger.info(f"⏭️ Batch {batch_id}: nada que extraer")
-            return
-
-        transformed = transform_data(extracted, spark)
-        load_to_warehouse(transformed, jdbc_url, db_properties)
-        logger.info(f"✅ Batch {batch_id} completado")
-    except Exception as e:
-        logger.error(f"💥 Batch {batch_id} falló: {e}")
-        raise
-
-
 def parse_partition_ranges(arg: str) -> list:
     """
     Convierte '0-24,30,32-35' en lista [0,1,...24,30,32,...35]
@@ -85,7 +64,7 @@ def parse_partition_ranges(arg: str) -> list:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Spark Streaming ETL minimal CLI")
+    parser = argparse.ArgumentParser(description="Spark Streaming ETL CLI con soporte multi-output")
     parser.add_argument(
         '--partitions', '-p', required=True,
         help="Rangos de particiones para assign, e.g. '0-24,30-35'"
@@ -94,20 +73,62 @@ def parse_args():
         '--topic', '-k', required=True,
         help="Topic de Kafka a consumir"
     )
+    parser.add_argument(
+        '--output',
+        choices=['db', 'csv'],
+        default='db',
+        help="Tipo de output: 'db' para PostgreSQL, 'csv' para archivos"
+    )
+    parser.add_argument(
+        '--output-path',
+        help="Ruta base para guardar CSVs (requerido si output=csv)"
+    )
     return parser.parse_args()
+
+
+def process_batch(df, batch_id, spark, jdbc_url, db_properties, args):
+    """Procesa cada batch con configuración de output"""
+    logger.info(f"🔄 Batch {batch_id}: procesando")
+    if df.isEmpty():
+        logger.info(f"⏭️ Batch {batch_id} vacío, omitido")
+        return
+
+    try:
+        extracted = extract_data(df, spark)
+        if extracted.isEmpty():
+            logger.info(f"⏭️ Batch {batch_id}: nada que extraer")
+            return
+
+        transformed = transform_data(extracted, spark)
+
+        if args.output == "db":
+            load_to_warehouse(transformed, 'db', jdbc_url, db_properties)
+        elif args.output == "csv":
+            load_to_warehouse(transformed, 'csv', args.output_path, batch_id)
+
+        logger.info(f"✅ Batch {batch_id} completado")
+    except Exception as e:
+        logger.error(f"💥 Batch {batch_id} falló: {e}")
+        raise
 
 
 def main():
     args = parse_args()
+
+    # Validar argumentos
+    if args.output == "csv" and not args.output_path:
+        logger.error("Se requiere --output-path para modo CSV")
+        sys.exit(1)
+
+    # Configuración común
     partitions = parse_partition_ranges(args.partitions)
     topic = args.topic
-
-    # Defaults
     bootstrap_servers = "ed-kafka:29092"
     trigger_interval = "1 minute"
     checkpoint_base = "/tmp/checkpoints/etl"
     checkpoint_path = f"{checkpoint_base}/partitions_{args.partitions.replace(',', '_')}"
 
+    # Configuración de PostgreSQL
     jdbc_url = "jdbc:postgresql://ed-postgres:5432/spark_results"
     db_props = {"user": "spark", "password": "root", "driver": "org.postgresql.Driver"}
 
@@ -115,20 +136,19 @@ def main():
     stream_df = setup_kafka_stream(spark, topic, partitions, bootstrap_servers)
 
     query = (stream_df.writeStream
-             .foreachBatch(lambda df, bid: process_batch(df, bid, spark, jdbc_url, db_props))
+             .foreachBatch(lambda df, bid: process_batch(df, bid, spark, jdbc_url, db_props, args))
              .outputMode("append")
              .trigger(processingTime=trigger_interval)
              .option("checkpointLocation", checkpoint_path)
              .start())
 
-    logger.info(f"🚀 Stream iniciado (topic={topic}, partitions={args.partitions}, trigger={trigger_interval})")
+    logger.info(f"🚀 Stream iniciado (output={args.output})")
     try:
         query.awaitTermination()
     except KeyboardInterrupt:
         logger.info("🛑 Parando stream...")
         query.stop()
         logger.info("🛑 Stream detenido")
-
 
 if __name__ == "__main__":
     main()

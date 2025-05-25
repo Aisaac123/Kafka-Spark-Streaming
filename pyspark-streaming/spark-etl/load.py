@@ -1,17 +1,14 @@
 from pyspark.sql import DataFrame
 import logging
+from datetime import datetime
+import os
 
 logger = logging.getLogger("spark-streaming-etl")
+
 
 def get_primary_key(table_name):
     """
     Devuelve el nombre de la columna de clave primaria para una tabla dada.
-
-    Args:
-        table_name: Nombre de la tabla
-
-    Returns:
-        Nombre de la columna de clave primaria o None si no se conoce
     """
     primary_keys = {
         "dim_time": "time_id",
@@ -23,77 +20,66 @@ def get_primary_key(table_name):
         "dim_product": "product_id",
         "dim_promotion": "promo_id",
         "fact_visits": "visit_id",
-        "fact_visits_products": None,  # Clave compuesta, no se maneja aquí
-        "fact_visits_promotions": None  # Clave compuesta, no se maneja aquí
+        "fact_visits_products": None,
+        "fact_visits_promotions": None
     }
-
     return primary_keys.get(table_name)
 
-def load_to_warehouse(data_dict: dict, jdbc_url: str, db_properties: dict) -> None:
-    """
-    Carga los datos transformados en el data warehouse.
 
-    Args:
-        data_dict: Diccionario con DataFrames transformados
-        jdbc_url: URL de conexión JDBC a PostgreSQL
-        db_properties: Propiedades de conexión a la base de datos
+def load_to_warehouse(data_dict: dict, *args) -> None:
     """
-    logger.info("📥 Cargando datos en el data warehouse")
+    Router principal de carga que maneja ambos tipos de output.
+    """
+    output_type = args[0]
+
+    if output_type == 'db':
+        _load_to_database(data_dict, args[1], args[2])  # jdbc_url, db_properties
+    elif output_type == 'csv':
+        _load_to_csv(data_dict, args[1], args[2])  # output_path, batch_id
+    else:
+        raise ValueError(f"Tipo de output no soportado: {output_type}")
+
+
+def _load_to_database(data_dict: dict, jdbc_url: str, db_properties: dict) -> None:
+    """Carga los datos en PostgreSQL"""
+    logger.info("📥 Cargando datos en PostgreSQL")
 
     if not data_dict:
         logger.info("⚠️ No hay datos para cargar")
         return
 
     try:
-        # Orden de carga: primero dimensiones, luego hechos, luego relaciones
         load_order = [
-            "dim_time", 
-            "dim_visitor", 
-            "dim_device", 
-            "dim_geo", 
-            "dim_channel", 
-            "dim_traffic_source", 
-            "dim_product",
-            "dim_promotion",
-            "fact_visits",
-            "fact_visits_products",
+            "dim_time", "dim_visitor", "dim_device", "dim_geo",
+            "dim_channel", "dim_traffic_source", "dim_product",
+            "dim_promotion", "fact_visits", "fact_visits_products",
             "fact_visits_promotions"
         ]
 
         for table_name in load_order:
             if table_name not in data_dict:
-                logger.warning(f"⚠️ Tabla {table_name} no encontrada en los datos transformados")
+                logger.warning(f"⚠️ Tabla {table_name} no encontrada")
                 continue
 
             df = data_dict[table_name]
-
             if df.isEmpty():
-                logger.info(f"⏭️ Tabla {table_name} vacía, omitiendo")
+                logger.info(f"⏭️ Tabla {table_name} vacía")
                 continue
 
-            # Cargar datos en modo upsert (actualizar si existe, insertar si no)
-            load_table(df, table_name, jdbc_url, db_properties)
+            _load_db_table(df, table_name, jdbc_url, db_properties)
 
-        logger.info("✅ Carga completada exitosamente")
+        logger.info("✅ Carga en PostgreSQL completada")
 
     except Exception as e:
-        logger.error(f"💥 Error al cargar datos: {e}")
+        logger.error(f"💥 Error en carga DB: {e}")
         raise
 
-def load_table(df: DataFrame, table_name: str, jdbc_url: str, db_properties: dict) -> None:
-    """
-    Carga un DataFrame en una tabla específica del data warehouse.
 
-    Args:
-        df: DataFrame a cargar
-        table_name: Nombre de la tabla destino
-        jdbc_url: URL de conexión JDBC a PostgreSQL
-        db_properties: Propiedades de conexión a la base de datos
-    """
+def _load_db_table(df: DataFrame, table_name: str, jdbc_url: str, db_properties: dict) -> None:
+    """Carga una tabla individual en PostgreSQL"""
     try:
-        logger.info(f"📤 Cargando tabla {table_name} ({df.count()} registros)")
+        logger.info(f"📤 Cargando {table_name} ({df.count()} registros)")
 
-        # Configurar opciones de escritura
         write_options = {
             "url": jdbc_url,
             "dbtable": table_name,
@@ -102,47 +88,103 @@ def load_table(df: DataFrame, table_name: str, jdbc_url: str, db_properties: dic
             "driver": db_properties["driver"]
         }
 
-        # Determinar el modo de escritura según la tabla
-        # Para tablas de dimensiones, necesitamos evitar duplicados
-        # Para la tabla de hechos, usamos "append" ya que la deduplicación ya se hizo en transform
-        write_mode = "append"  # Valor predeterminado
+        write_mode = "append"
+        pk = get_primary_key(table_name)
 
-        if table_name.startswith("dim_"):
-            # Para tablas de dimensiones, filtrar registros que ya existen en la base de datos
-            # Obtener la clave primaria según la tabla
-            primary_key = get_primary_key(table_name)
+        if pk and table_name.startswith("dim_"):
+            try:
+                existing_ids = df.sparkSession.read \
+                    .format("jdbc") \
+                    .options(**write_options) \
+                    .option("dbtable", f"(SELECT {pk} FROM {table_name}) AS existing") \
+                    .load() \
+                    .select(pk) \
+                    .rdd.flatMap(lambda x: x).collect()
 
-            # Filtrar registros que ya existen en la base de datos
-            if primary_key:
-                try:
-                    # Leer los IDs existentes en la base de datos
-                    existing_ids_df = df.sparkSession.read \
-                        .format("jdbc") \
-                        .options(**write_options) \
-                        .option("dbtable", f"(SELECT {primary_key} FROM {table_name}) AS existing_ids") \
-                        .load()
+                if existing_ids:
+                    df = df.filter(~df[pk].isin(existing_ids))
+                    logger.info(f"Filtrados {len(existing_ids)} duplicados en {table_name}")
+            except Exception as e:
+                logger.warning(f"No se pudieron filtrar duplicados: {e}")
+                write_mode = "ignore"
 
-                    # Obtener los IDs como una lista
-                    existing_ids = [row[0] for row in existing_ids_df.select(primary_key).collect()]
-
-                    # Filtrar el DataFrame para excluir registros con IDs existentes
-                    if existing_ids:
-                        df = df.filter(~df[primary_key].isin(existing_ids))
-                        logger.info(f"Filtrando {len(existing_ids)} registros existentes de {table_name}")
-                except Exception as e:
-                    logger.warning(f"No se pudieron filtrar registros existentes: {e}")
-                    # Si no podemos filtrar, usar el modo "ignore" para evitar errores de duplicados
-                    write_mode = "ignore"
-                    logger.info(f"Usando modo 'ignore' para {table_name} para evitar duplicados")
-
-        # Escribir en la base de datos
         df.write.format("jdbc") \
             .options(**write_options) \
             .mode(write_mode) \
             .save()
 
-        logger.info(f"✅ Tabla {table_name} cargada correctamente")
+        logger.info(f"✅ {table_name} cargada en DB")
 
     except Exception as e:
-        logger.error(f"💥 Error al cargar tabla {table_name}: {e}")
+        logger.error(f"💥 Error cargando {table_name}: {e}")
+        raise
+
+
+def _load_to_csv(data_dict: dict, output_path: str, batch_id: int) -> None:
+    """Carga datos en CSVs únicos por tabla"""
+    try:
+        load_order = [
+            "dim_time", "dim_visitor", "dim_device",
+            "dim_geo", "dim_channel", "dim_traffic_source",
+            "dim_product", "dim_promotion", "fact_visits",
+            "fact_visits_products", "fact_visits_promotions"
+        ]
+
+        # Ruta única para todos los batches
+        base_path = os.path.join(output_path, "consolidated_data")
+
+        for table_name in load_order:
+            if table_name not in data_dict:
+                continue
+
+            df = data_dict[table_name]
+            if df.isEmpty():
+                continue
+
+            table_dir = os.path.join(base_path, table_name)
+            os.makedirs(table_dir, exist_ok=True)
+
+            _write_csv_file(df, table_dir, table_name)
+
+        logger.info(f"✅ Datos consolidados en {base_path}")
+
+    except Exception as e:
+        logger.error(f"💥 Error en carga CSV: {e}")
+        raise
+
+def _write_csv_file(df: DataFrame, path: str, table_name: str) -> None:
+    """Escribe en un único CSV por tabla, acumulando batches"""
+    try:
+        final_path = os.path.join(path, table_name + ".csv")
+        header = not os.path.exists(final_path)  # Solo header si no existe
+
+        # Leer CSV existente y unir con nuevos datos
+        if os.path.exists(final_path):
+            existing_df = df.sparkSession.read \
+                .option("header", "true") \
+                .option("inferSchema", "true") \
+                .csv(final_path)
+            df = existing_df.union(df)
+
+        # Escribir todo en modo overwrite
+        (df.repartition(1)
+           .write
+           .mode("overwrite")
+           .option("header", "true" if header else "false")
+           .option("delimiter", "|")
+           .option("encoding", "UTF-8")
+           .csv(os.path.dirname(final_path)))
+
+        # Renombrar archivo temporal
+        temp_file = [f for f in os.listdir(os.path.dirname(final_path))
+                    if f.startswith("part-00000")][0]
+        os.rename(
+            os.path.join(os.path.dirname(final_path), temp_file),
+            final_path
+        )
+
+        logger.info(f"✅ {table_name} actualizado en {final_path}")
+
+    except Exception as e:
+        logger.error(f"💥 Error escribiendo CSV: {e}")
         raise
