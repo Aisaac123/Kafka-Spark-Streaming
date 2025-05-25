@@ -1,2 +1,73 @@
-data
-.idea
+# Python
+__pycache__/
+**/__pycache__/**
+pyspark-streaming/spark-etl/__pycache__
+*.py[cod]
+*.pyc
+*$py.class
+*.so
+.Python
+venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Hadoop
+/tmp/hdfs/
+hadoop-hive.env
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Data directories
+data/
+data_warehouse/
+streaming_data/
+postgres_data/
+
+# Kafka
+kafka-logs/
+kafka-data/
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~.nib
+local.properties
