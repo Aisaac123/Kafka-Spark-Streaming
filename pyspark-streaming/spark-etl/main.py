@@ -75,13 +75,13 @@ def parse_args():
     )
     parser.add_argument(
         '--output',
-        choices=['db', 'csv'],
+        choices=['db', 'csv', 'hdfs'],
         default='db',
         help="Tipo de output: 'db' para PostgreSQL, 'csv' para archivos"
     )
     parser.add_argument(
         '--output-path',
-        help="Ruta base para guardar CSVs (requerido si output=csv)"
+        help="Ruta de salida (requerido para csv/hdfs)"
     )
     return parser.parse_args()
 
@@ -105,6 +105,8 @@ def process_batch(df, batch_id, spark, jdbc_url, db_properties, args):
             load_to_warehouse(transformed, 'db', jdbc_url, db_properties)
         elif args.output == "csv":
             load_to_warehouse(transformed, 'csv', args.output_path, batch_id)
+        elif args.output == "hdfs":
+            load_to_warehouse(transformed, 'hdfs', args.output_path)
 
         logger.info(f"✅ Batch {batch_id} completado")
     except Exception as e:
@@ -116,9 +118,14 @@ def main():
     args = parse_args()
 
     # Validar argumentos
-    if args.output == "csv" and not args.output_path:
-        logger.error("Se requiere --output-path para modo CSV")
+    if args.output in ['csv', 'hdfs'] and not args.output_path:
+        logger.error(f"Se requiere --output-path para modo {args.output}")
         sys.exit(1)
+
+    # Configuración adicional para HDFS
+    spark = setup_spark()
+    spark.conf.set("spark.hadoop.fs.defaultFS", "hdfs://namenode:8020")
+    spark.conf.set("spark.hadoop.dfs.client.use.datanode.hostname", "true")
 
     # Configuración común
     partitions = parse_partition_ranges(args.partitions)

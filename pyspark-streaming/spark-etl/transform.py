@@ -210,7 +210,6 @@ def create_dim_time(df: DataFrame, spark: SparkSession) -> DataFrame:
         "year_quarter"
     )
 
-
 def create_dim_visitor(df: DataFrame) -> DataFrame:
     custom_dim_value = when(
         size(col("customDimensions")) > 0,
@@ -284,7 +283,6 @@ def create_dim_device(df: DataFrame) -> DataFrame:
                                                            col("is_mobile").cast(StringType())),
                                                  256))
 
-
 def create_dim_geo(df: DataFrame) -> DataFrame:
     """Crea la dimensión geográfica"""
     if "geoNetwork" not in df.columns:
@@ -315,7 +313,6 @@ def create_dim_geo(df: DataFrame) -> DataFrame:
         logger.error(f"Error creando dim_geo: {str(e)}")
         return create_default_geo(df)
 
-
 def create_default_geo(df: DataFrame) -> DataFrame:
     """Crea datos geográficos por defecto"""
     # Create a default geo DataFrame using the SparkSession from the input DataFrame
@@ -331,7 +328,6 @@ def create_default_geo(df: DataFrame) -> DataFrame:
         sha2(concat_ws("|", col("continent"), col("country"), col("region"), col("city")), 256)
     )
 
-
 def create_dim_channel(df: DataFrame) -> DataFrame:
     """Crea la dimensión de canal"""
     channel = df.select(
@@ -340,7 +336,6 @@ def create_dim_channel(df: DataFrame) -> DataFrame:
 
     return channel.withColumn("channel_id",
                               sha2(col("channel_grouping"), 256))
-
 
 def create_dim_traffic_source(df: DataFrame) -> DataFrame:
     """Crea la dimensión de fuente de tráfico"""
@@ -369,7 +364,6 @@ def create_dim_traffic_source(df: DataFrame) -> DataFrame:
     return traffic_df.distinct().withColumn("traffic_source_id",
                                             sha2(concat_ws("|", col("source"), col("medium"), col("campaign")), 256))
 
-
 def create_dim_campaign(df: DataFrame) -> DataFrame:
     """Crea la dimensión de campaña"""
     # Crear un DataFrame base con valores predeterminados
@@ -396,7 +390,6 @@ def create_dim_campaign(df: DataFrame) -> DataFrame:
 
     return campaign.distinct().withColumn("campaign_id",
                                           sha2(col("campaign_name"), 256))
-
 
 def create_dim_product(df: DataFrame) -> DataFrame:
     """Crea la dimensión de producto"""
@@ -519,22 +512,44 @@ def create_dim_product(df: DataFrame) -> DataFrame:
             lit(0.0).alias("product_price")
         ).where(lit(False))
 
+def create_dim_promotion(df: DataFrame) -> DataFrame:
+    """Crea la dimensión de promoción usando promoId del JSON como clave primaria"""
+    try:
+        # Explotar hits y promociones
+        exploded_hits = df.select(
+            col("visitId").cast(IntegerType()).alias("visit_id"),
+            explode(col("hits")).alias("hit")
+        )
+
+        exploded_promos = exploded_hits.select(
+            col("visit_id"),
+            explode(col("hit.promotion")).alias("promotion")
+        ).filter(col("promotion").isNotNull())
+
+        # Extraer campos de la promoción (usar promoId directamente)
+        promotions = exploded_promos.select(
+            coalesce(col("promotion.promoId"), lit("UNKNOWN_PROMO")).alias("promo_id"),
+            coalesce(col("promotion.promoName"), lit("(not set)")).alias("promo_name"),
+            coalesce(col("promotion.promoCreative"), lit("(not set)")).alias("promo_creative"),
+            coalesce(col("promotion.promoPosition"), lit("(not set)")).alias("promo_position")
+        ).distinct()
+
+        return promotions
+
+    except Exception as e:
+        logger.error(f"Error creando dim_promotion: {str(e)}")
+        # Devolver DataFrame vacío con esquema correcto
+
 def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: DataFrame,
                        dim_device_df: DataFrame, dim_geo_df: DataFrame,
                        dim_channel_df: DataFrame, dim_traffic_df: DataFrame) -> DataFrame:
-    """Crea la tabla de hechos de visitas"""
-    # Preparar datos base
-    base_df = df.withColumn("visit_id", col("visitId").cast(IntegerType()))
 
-    custom_dim_value_fact = when(
-        size(col("customDimensions")) > 0,
-        expr("element_at(transform(customDimensions, x -> x.value), 1)")
-    ).otherwise(lit("unknown"))
 
     base_df = df.withColumn("visit_id", col("visitId").cast(IntegerType())) \
         .withColumn("network_domain", coalesce(col("geoNetwork.networkDomain"), lit("Unknown"))) \
         .withColumn("is_new_visitor",
                     when(col("totals.newVisits") == "1", lit(True)).otherwise(lit(False)))
+
     # Verificar si existe la columna totals
     columns = df.columns
     if "totals" in columns:
@@ -603,8 +618,13 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
                                  .otherwise(0))
 
     # Unir con dimensiones para obtener claves foráneas
-    result = base_df \
-        .join(dim_time_df, base_df["date"] == dim_time_df["date_int"], "left")
+    dt = dim_time_df.select("time_id", "date_int", "full_date").alias("dt")
+
+    result = base_df.join(
+        dt,
+        col("date") == col("dt.date_int"),
+        "left"
+    )
 
     # FIX: Crear la misma combinación de campos para el join que se usa en dim_visitor
     # Condición de unión simplificada para asegurar que se encuentren coincidencias
@@ -881,6 +901,7 @@ def create_fact_visits(df: DataFrame, dim_time_df: DataFrame, dim_visitor_df: Da
         col("device_id"),
         col("geo_id"),
         col("channel_id"),
+        dim_time_df["full_date"].alias("full_date"),
         col("traffic_source_id"),
         col("network_domain"),
         col("totals_visits"),
@@ -945,35 +966,6 @@ def create_fact_visits_products(df: DataFrame, fact_visits_df: DataFrame, dim_pr
 
     except Exception as e:
         logger.error(f"Error en create_fact_visits_products: {str(e)}")
-
-def create_dim_promotion(df: DataFrame) -> DataFrame:
-    """Crea la dimensión de promoción usando promoId del JSON como clave primaria"""
-    try:
-        # Explotar hits y promociones
-        exploded_hits = df.select(
-            col("visitId").cast(IntegerType()).alias("visit_id"),
-            explode(col("hits")).alias("hit")
-        )
-
-        exploded_promos = exploded_hits.select(
-            col("visit_id"),
-            explode(col("hit.promotion")).alias("promotion")
-        ).filter(col("promotion").isNotNull())
-
-        # Extraer campos de la promoción (usar promoId directamente)
-        promotions = exploded_promos.select(
-            coalesce(col("promotion.promoId"), lit("UNKNOWN_PROMO")).alias("promo_id"),
-            coalesce(col("promotion.promoName"), lit("(not set)")).alias("promo_name"),
-            coalesce(col("promotion.promoCreative"), lit("(not set)")).alias("promo_creative"),
-            coalesce(col("promotion.promoPosition"), lit("(not set)")).alias("promo_position")
-        ).distinct()
-
-        return promotions
-
-    except Exception as e:
-        logger.error(f"Error creando dim_promotion: {str(e)}")
-        # Devolver DataFrame vacío con esquema correcto
-
 
 def create_fact_visits_promotions(df: DataFrame, fact_visits_df: DataFrame, dim_promotion_df: DataFrame) -> DataFrame:
     """Crea fact_visits_promotions usando promoIsView/promoIsClick del hit, no de cada promoción"""

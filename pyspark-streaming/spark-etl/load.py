@@ -1,7 +1,11 @@
-from pyspark.sql import DataFrame
+import subprocess
+
+from pyspark.sql import DataFrame, SparkSession
 import logging
 from datetime import datetime
 import os
+
+from pyspark.sql.functions import expr
 
 logger = logging.getLogger("spark-streaming-etl")
 
@@ -25,21 +29,96 @@ def get_primary_key(table_name):
     }
     return primary_keys.get(table_name)
 
-
+# Main load function
 def load_to_warehouse(data_dict: dict, *args) -> None:
     """
-    Router principal de carga que maneja ambos tipos de output.
+    Router principal de carga que maneja múltiples outputs
     """
     output_type = args[0]
 
     if output_type == 'db':
-        _load_to_database(data_dict, args[1], args[2])  # jdbc_url, db_properties
+        _load_to_database(data_dict, args[1], args[2])
     elif output_type == 'csv':
-        _load_to_csv(data_dict, args[1], args[2])  # output_path, batch_id
+        _load_to_csv(data_dict, args[1], args[2])
+    elif output_type == 'hdfs':  # Nueva opción
+        _load_to_hdfs(data_dict, args[1])
     else:
         raise ValueError(f"Tipo de output no soportado: {output_type}")
 
+# Load to HDFS
+def _load_to_hdfs(data_dict: dict, hdfs_path: str) -> None:
+    """Carga datos en HDFS: particiona fact_visits y las intermedias, sin particionar dimensiones."""
+    logger.info("📥 Cargando datos en HDFS")
 
+    hdfs_namenode = "hdfs://namenode:8020"
+    full_hdfs_path = f"{hdfs_namenode}{hdfs_path}"
+
+    dimensiones = {
+        "dim_time", "dim_visitor", "dim_device",
+        "dim_geo", "dim_channel", "dim_traffic_source",
+        "dim_product", "dim_promotion"
+    }
+    hecho     = {"fact_visits"}
+    intermedias = {"fact_visits_products", "fact_visits_promotions"}
+
+    # Prepara un pequeño DataFrame con visit_id+full_date para los joins intermedios
+    fact_visits_df = data_dict.get("fact_visits")
+    if fact_visits_df is None:
+        raise ValueError("fact_visits no está en data_dict")
+
+    fact_dates = fact_visits_df.select("visit_id", "full_date").alias("fv_dates")
+
+    for table_name, df in data_dict.items():
+        if df.isEmpty():
+            continue
+
+        target_path = f"{full_hdfs_path}/{table_name}"
+
+        if table_name in dimensiones:
+            # 1) Dimension: vuelca plano, sin particionar
+            df.write.mode("overwrite").parquet(target_path)
+            logger.info(f"✅ {table_name} (dimensión) en HDFS: {target_path}")
+
+        elif table_name in hecho:
+            # 2) Hecho: particiona por full_date
+            df2 = df.withColumn("full_date", expr("to_date(full_date)"))
+            df2.write \
+               .partitionBy("full_date") \
+               .mode("overwrite") \
+               .parquet(target_path)
+            logger.info(f"✅ {table_name} particionado en HDFS: {target_path}")
+
+        elif table_name in intermedias:
+            # 3) Intermedia: le agrego full_date vía join con fact_visits
+            df2 = df.join(
+                fact_dates,
+                on="visit_id",
+                how="left"
+            ).withColumn("full_date", expr("to_date(full_date)"))
+            df2.write \
+               .partitionBy("full_date") \
+               .mode("overwrite") \
+               .parquet(target_path)
+            logger.info(f"✅ {table_name} (intermedia) particionado en HDFS: {target_path}")
+
+        else:
+            # Por si hay alguna tabla extra: vuelca plano
+            df.write.mode("overwrite").parquet(target_path)
+            logger.info(f"✅ {table_name} (otro) en HDFS: {target_path}")
+def _hadoop_mkdir(path: str) -> None:
+    """Crea directorios en HDFS usando comandos nativos"""
+    try:
+        subprocess.run([
+            "hadoop",
+            "fs",
+            "-mkdir",
+            "-p",
+            path
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"No se pudo crear directorio HDFS: {e}")
+
+# Load to DATA BASE
 def _load_to_database(data_dict: dict, jdbc_url: str, db_properties: dict) -> None:
     """Carga los datos en PostgreSQL"""
     logger.info("📥 Cargando datos en PostgreSQL")
@@ -73,8 +152,6 @@ def _load_to_database(data_dict: dict, jdbc_url: str, db_properties: dict) -> No
     except Exception as e:
         logger.error(f"💥 Error en carga DB: {e}")
         raise
-
-
 def _load_db_table(df: DataFrame, table_name: str, jdbc_url: str, db_properties: dict) -> None:
     """Carga una tabla individual en PostgreSQL"""
     try:
@@ -119,7 +196,7 @@ def _load_db_table(df: DataFrame, table_name: str, jdbc_url: str, db_properties:
         logger.error(f"💥 Error cargando {table_name}: {e}")
         raise
 
-
+# Load to CSV
 def _load_to_csv(data_dict: dict, output_path: str, batch_id: int) -> None:
     """Carga datos en CSVs únicos por tabla"""
     try:
@@ -151,7 +228,6 @@ def _load_to_csv(data_dict: dict, output_path: str, batch_id: int) -> None:
     except Exception as e:
         logger.error(f"💥 Error en carga CSV: {e}")
         raise
-
 def _write_csv_file(df: DataFrame, path: str, table_name: str) -> None:
     """Escribe en un único CSV por tabla, acumulando batches"""
     try:
